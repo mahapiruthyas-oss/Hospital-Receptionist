@@ -1,0 +1,37 @@
+require('dotenv').config();
+const express = require('express');
+const http = require('http');
+const socketio = require('socket.io');
+const connectDB = require('./db');
+
+const app = express();
+const server = http.createServer(app);
+const io = socketio(server);
+
+// Connect to MongoDB
+connectDB();
+
+// Middleware
+app.use(express.json());
+app.use(express.static('public'));
+app.get('/', (req, res) => {
+  res.sendFile(__dirname + '/public/dashboard.html');
+});
+// Routes
+app.use('/api/patients', require('./routes/patients'));
+
+// Socket.io
+io.on('connection', (socket) => {
+  console.log('Client connected');
+  socket.on('disconnect', () => {
+    console.log('Client disconnected');
+  });
+});
+
+// Export io so routes can use it
+app.set('io', io);
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});

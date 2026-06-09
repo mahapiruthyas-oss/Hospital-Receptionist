@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hospital Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; background: #f0f4f8; }
+    .header { background: #1a73e8; color: white; padding: 16px 20px; }
+    .header h1 { font-size: 20px; }
+    .header p { font-size: 13px; opacity: 0.85; }
+    .container { padding: 16px; max-width: 600px; margin: auto; }
+
+    .add-form { background: white; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+    .add-form h2 { font-size: 15px; margin-bottom: 12px; color: #333; }
+    .add-form input, .add-form select {
+      width: 100%; padding: 10px; margin-bottom: 10px;
+      border: 1px solid #ddd; border-radius: 8px; font-size: 14px;
+    }
+    .btn-add { width: 100%; padding: 12px; background: #1a73e8; color: white; border: none; border-radius: 8px; font-size: 15px; cursor: pointer; }
+
+    .queue-section { background: white; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+    .queue-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .queue-header h2 { font-size: 15px; color: #333; }
+    .btn-next { padding: 10px 20px; background: #34a853; color: white; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; }
+
+    .patient-card { display: flex; align-items: center; padding: 12px; border-bottom: 1px solid #f0f0f0; }
+    .token { background: #1a73e8; color: white; width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; margin-right: 12px; flex-shrink: 0; }
+    .token.seen { background: #ccc; }
+    .patient-info { flex: 1; }
+    .patient-name { font-weight: bold; font-size: 14px; color: #333; }
+    .patient-detail { font-size: 12px; color: #888; margin-top: 2px; }
+    .status-badge { padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: bold; }
+    .status-waiting { background: #fff3cd; color: #856404; }
+    .status-seen { background: #d4edda; color: #155724; }
+    .empty { text-align: center; padding: 30px; color: #aaa; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🏥 Hospital Dashboard</h1>
+    <p id="dateDisplay"></p>
+  </div>
+
+  <div class="container">
+    <!-- Add Patient Form -->
+    <div class="add-form">
+      <h2>➕ Add Walk-in Patient</h2>
+      <input type="text" id="patientName" placeholder="Patient Name" />
+      <input type="text" id="patientMobile" placeholder="Mobile Number" />
+      <input type="text" id="patientDoctor" placeholder="Doctor Name" />
+      <button class="btn-add" onclick="addPatient()">Add to Queue</button>
+    </div>
+
+    <!-- Queue List -->
+    <div class="queue-section">
+      <div class="queue-header">
+        <h2>📋 Today's Queue</h2>
+        <button class="btn-next" onclick="nextPatient()">✅ Next Patient</button>
+      </div>
+      <div id="patientList"><div class="empty">No patients yet today</div></div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+
+    // Show date
+    document.getElementById('dateDisplay').textContent = new Date().toDateString();
+
+    // Load patients
+    async function loadPatients() {
+      const res = await fetch('/api/patients');
+      const patients = await res.json();
+      renderPatients(patients);
+    }
+
+    function renderPatients(patients) {
+      const list = document.getElementById('patientList');
+      if (patients.length === 0) {
+        list.innerHTML = '<div class="empty">No patients yet today</div>';
+        return;
+      }
+      list.innerHTML = patients.map(p => `
+        <div class="patient-card">
+          <div class="token ${p.status === 'seen' ? 'seen' : ''}">${p.tokenNumber}</div>
+          <div class="patient-info">
+            <div class="patient-name">${p.name}</div>
+            <div class="patient-detail">${p.mobile} · ${p.doctor}</div>
+          </div>
+          <span class="status-badge ${p.status === 'seen' ? 'status-seen' : 'status-waiting'}">
+            ${p.status === 'seen' ? 'Seen' : 'Waiting'}
+          </span>
+        </div>
+      `).join('');
+    }
+
+    // Add patient
+    async function addPatient() {
+      const name = document.getElementById('patientName').value.trim();
+      const mobile = document.getElementById('patientMobile').value.trim();
+      const doctor = document.getElementById('patientDoctor').value.trim();
+      if (!name || !mobile || !doctor) { alert('Please fill all fields'); return; }
+
+      await fetch('/api/patients', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, mobile, doctor })
+      });
+
+      document.getElementById('patientName').value = '';
+      document.getElementById('patientMobile').value = '';
+      document.getElementById('patientDoctor').value = '';
+      loadPatients();
+    }
+
+    // Next patient
+    async function nextPatient() {
+      await fetch('/api/patients/next', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hospitalId: 'H001' })
+      });
+      loadPatients();
+    }
+
+    // Real-time updates
+    socket.on('patientAdded', () => loadPatients());
+    socket.on('patientCalled', () => loadPatients());
+
+    loadPatients();
+  </script>
+</body>
+</html>
