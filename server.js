@@ -19,7 +19,7 @@ app.get('/', (req, res) => {
 });
 // Routes
 app.use('/api/patients', require('./routes/patients'));
-
+app.use('/voice', require('./routes/voice'));
 // Socket.io
 io.on('connection', (socket) => {
   console.log('Client connected');
