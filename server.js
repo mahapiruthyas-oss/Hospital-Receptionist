@@ -3,6 +3,7 @@ const express = require('express');
 const http = require('http');
 const socketio = require('socket.io');
 const connectDB = require('./db');
+const { router: voiceRouter, setupMediaStream } = require('./routes/voice');
 
 const app = express();
 const server = http.createServer(app);
@@ -17,9 +18,14 @@ app.use(express.static('public'));
 app.get('/', (req, res) => {
   res.sendFile(__dirname + '/public/dashboard.html');
 });
+
 // Routes
 app.use('/api/patients', require('./routes/patients'));
-app.use('/voice', require('./routes/voice'));
+app.use('/voice', voiceRouter);
+
+// Setup Media Stream WebSocket
+setupMediaStream(server);
+
 // Socket.io
 io.on('connection', (socket) => {
   console.log('Client connected');
@@ -28,7 +34,6 @@ io.on('connection', (socket) => {
   });
 });
 
-// Export io so routes can use it
 app.set('io', io);
 
 const PORT = process.env.PORT || 3000;
