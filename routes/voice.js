@@ -34,7 +34,7 @@ router.post('/', (req, res) => {
   const host = req.headers.host;
   
   // Respond IMMEDIATELY with TwiML
-  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+ const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
     <Stream url="wss://${host}/voice/stream" />
