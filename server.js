@@ -13,10 +13,12 @@ const io = socketio(server);
 connectDB();
 
 // Middleware
-app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // ADD THIS
+app.use(express.json()); // ADD THIS
 app.use(express.static('public'));
+
 app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/public/dashboard.html');
+    res.sendFile(__dirname + '/public/dashboard.html');
 });
 
 // Routes
