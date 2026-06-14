@@ -16,21 +16,43 @@ const callSessions = {};
 const FAQS = [ /* ... as before ... */ ];
 function checkFAQ(text) { /* ... as before ... */ }
 
-router.post('/', (req, res) => { /* ... as before ... */ });
+// Initialize the client once at the top of your file (outside this function)
+const sarvamClient = new SarvamAIClient({ apiSubscriptionKey: process.env.SARVAM_API_KEY });
 
-function setupMediaStream(server) {
+router.post('/', (req, res) => {
+  const callSid = req.body.CallSid || req.body.callSid || 'unknown';
+  console.log('✅ Incoming call - CallSid:', callSid);
+
+  // Initialize session immediately
+  callSessions[callSid] = { 
+    hospitalId: 'H001', 
+    collected: { name: null, mobile: null, doctor: null }, 
+    conversationHistory: [], 
+    step: 'greeting' 
+  };
+
+  const host = req.headers.host;
+  
+  // Respond IMMEDIATELY with TwiML
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="wss://${host}/voice/stream" />
+  </Connect>
+</Response>`;
+
+  res.type('text/xml');
+  res.send(twiml);
+});
+
+function setupMediaStream(server, io) {
   Patient = mongoose.model('Patient');
   const wss = new WebSocket.Server({ server, path: '/voice/stream' });
-  
-  // Initialize Sarvam Client
-  const sarvamClient = new SarvamAIClient({
-    apiSubscriptionKey: process.env.SARVAM_API_KEY
-  });
 
   wss.on('connection', (ws) => {
     let callSid = null;
     let streamSid = null;
-    let audioBuffer = [];
+    let audioChunks = [];
     let silenceTimer = null;
     let isProcessing = false;
 
@@ -40,12 +62,10 @@ function setupMediaStream(server) {
       if (data.event === 'start') {
         callSid = data.start.callSid;
         streamSid = data.start.streamSid;
+        console.log('Call started:', callSid);
         await sendTTSResponse(ws, 'வணக்கம்! இது ஸ்ரீ லட்சுமி மருத்துவமனை.', streamSid);
+        return;
       }
-
-      if (data.event === 'media' && !isProcessing) {
-        audioBuffer.push(data.media.payload);
-        clearTimeout(silenceTimer);
         
         silenceTimer = setTimeout(async () => {
           if (audioBuffer.length < 5) { audioBuffer = []; return; }
