@@ -98,8 +98,6 @@ console.log('Patient said:', patientText);
           }
           isProcessing = false;
         }, 500);
-      }
-    });
   });
   return wss;
 }
