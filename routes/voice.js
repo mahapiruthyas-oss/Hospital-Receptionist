@@ -4,11 +4,12 @@ const axios = require('axios');
 const WebSocket = require('ws');
 const mongoose = require('mongoose');
 const FormData = require('form-data');
+const { Readable } = require('stream');
 
 let Patient;
 const callSessions = {};
 
-// Decoder: mu-law to PCM
+// Helper: mu-law to PCM
 function mulawToPcm(buffer) {
     const pcm = Buffer.alloc(buffer.length * 2);
     for (let i = 0; i < buffer.length; i++) {
@@ -22,12 +23,13 @@ function mulawToPcm(buffer) {
     return pcm;
 }
 
-// Fixed STT: Uses correct multipart boundaries
+// Fixed STT: Uses Readable stream and formData headers
 async function transcribeAudio(mulawBuffer) {
     const pcmBuffer = mulawToPcm(mulawBuffer);
     const formData = new FormData();
+    const audioStream = Readable.from(pcmBuffer);
     
-    formData.append('file', pcmBuffer, { filename: 'audio.pcm', contentType: 'audio/pcm' });
+    formData.append('file', audioStream, { filename: 'audio.pcm', contentType: 'audio/pcm', knownLength: pcmBuffer.length });
     formData.append('model', 'saaras:v3');
     formData.append('language_code', 'ta-IN');
     formData.append('mode', 'transcribe');
@@ -44,7 +46,6 @@ async function transcribeAudio(mulawBuffer) {
 
 router.post('/', (req, res) => {
     const callSid = (req.body && req.body.CallSid) || (req.body && req.body.callSid) || 'unknown';
-    callSessions[callSid] = { hospitalId: 'H001', collected: { name: null, mobile: null, doctor: null }, conversationHistory: [], step: 'greeting' };
     const host = req.headers.host;
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -57,9 +58,7 @@ router.post('/', (req, res) => {
 });
 
 function setupMediaStream(server, io) {
-    Patient = mongoose.model('Patient');
     const wss = new WebSocket.Server({ server, path: '/voice/stream' });
-
     wss.on('connection', (ws) => {
         let audioChunks = [];
         let silenceTimer = null;
