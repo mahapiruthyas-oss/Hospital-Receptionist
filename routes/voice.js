@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const WebSocket = require('ws');
+const mongoose = require('mongoose');
 const FormData = require('form-data');
 const { Readable } = require('stream');
 
@@ -19,12 +20,13 @@ function mulawToPcm(buffer) {
 }
 
 async function transcribeAudio(mulawBuffer) {
-    if (!process.env.SARVAM_API_KEY) {
-        throw new Error('SARVAM_API_KEY is missing from environment variables');
-    }
     const pcmBuffer = mulawToPcm(mulawBuffer);
     const formData = new FormData();
-    formData.append('file', Readable.from(pcmBuffer), { filename: 'audio.pcm', contentType: 'audio/pcm' });
+    // Corrected contentType to be compliant with Sarvam API validation
+    formData.append('file', Readable.from(pcmBuffer), { 
+        filename: 'audio.pcm', 
+        contentType: 'audio/pcm_s16le' 
+    });
     formData.append('model', 'saaras:v3');
     formData.append('language_code', 'ta-IN');
     formData.append('mode', 'transcribe');
@@ -68,7 +70,7 @@ function setupMediaStream(server) {
                     try {
                         const transcript = await transcribeAudio(mulawBuffer);
                         console.log('Transcript:', transcript);
-                    } catch (err) { console.error('STT API Error:', err.response?.data || err.message); }
+                    } catch (err) { console.error('STT API Error:', err.message); }
                     isProcessing = false;
                 }, 500);
             }
