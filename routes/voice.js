@@ -97,10 +97,11 @@ console.log('Patient said:', patientText);
             console.error('FULL ERROR', error);
           }
           isProcessing = false;
-        }, 500);
-  });
-  return wss;
-}
+   }, 500);
+    }); 
+});
 
+return wss;
+}
 // [sendTTSResponse and other helpers remain same...]
 module.exports = { router, setupMediaStream };
