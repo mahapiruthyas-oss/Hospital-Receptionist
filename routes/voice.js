@@ -80,7 +80,7 @@ function setupMediaStream(server, io) {
                     isProcessing = false;
                 }, 500);
 }); 
-    }); 
+    
 
     return wss; 
 } 
