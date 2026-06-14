@@ -97,5 +97,32 @@ async function sendTTSResponse(ws, text, streamSid) {
         console.error('❌ TTS error:', error.message); 
     }
 }
+// Add these functions to your voice.js
+function mulawToPcm(buffer) {
+    const pcm = Buffer.alloc(buffer.length * 2);
+    for (let i = 0; i < buffer.length; i++) {
+        let u = buffer[i] ^ 0xff;
+        let s = (u & 0x0f) << 4;
+        let e = (u & 0x70) >> 4;
+        let b = (s + 0x84) << e;
+        let v = (u & 0x80) ? (0x84 - b) : (b - 0x84);
+        pcm.writeInt16LE(v, i * 2);
+    }
+    return pcm;
+}
 
+async function transcribeAudio(mulawBuffer) {
+    const pcmBuffer = mulawToPcm(mulawBuffer);
+    const formData = new FormData();
+    formData.append('file', new Blob([pcmBuffer], { type: 'audio/pcm' }), 'audio.pcm');
+    formData.append('model', 'saaras:v3');
+    formData.append('language_code', 'ta-IN');
+    formData.append('mode', 'transcribe');
+    formData.append('input_audio_codec', 'pcm_s16le');
+
+    const res = await axios.post('https://api.sarvam.ai/speech-to-text', formData, {
+        headers: { 'api-subscription-key': process.env.SARVAM_API_KEY }
+    });
+    return res.data.transcript || '';
+}
 module.exports = { router, setupMediaStream };
