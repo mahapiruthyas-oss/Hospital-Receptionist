@@ -98,10 +98,37 @@ console.log('Patient said:', patientText);
           }
           isProcessing = false;
    }, 500);
+}, 500); 
     }); 
-});
+}); 
 
-return wss;
+return wss; 
+} 
+
+async function sendTTSResponse(ws, text, streamSid) {
+    try {
+        const ttsResponse = await axios.post('https://api.sarvam.ai/text-to-speech', {
+            inputs: [text], 
+            target_language_code: 'ta-IN', 
+            speaker: 'anushka', 
+            model: 'bulbul:v2', 
+            encoding: 'MULAW', 
+            sample_rate: 8000
+        }, { 
+            headers: { 'api-subscription-key': process.env.SARVAM_API_KEY, 'Content-Type': 'application/json' } 
+        });
+        
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ 
+                event: 'media', 
+                streamSid, 
+                media: { payload: ttsResponse.data.audios[0] } 
+            }));
+            console.log('✅ TTS audio sent');
+        }
+    } catch (error) { 
+        console.error('❌ TTS error:', error.message); 
+    }
 }
 // [sendTTSResponse and other helpers remain same...]
 module.exports = { router, setupMediaStream };
