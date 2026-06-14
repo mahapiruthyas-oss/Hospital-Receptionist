@@ -2,11 +2,9 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const WebSocket = require('ws');
-const mongoose = require('mongoose');
 const FormData = require('form-data');
 const { Readable } = require('stream');
 
-// Helper: Convert Telephony mu-law (8kHz) to Linear PCM (16-bit)
 function mulawToPcm(buffer) {
     const pcm = Buffer.alloc(buffer.length * 2);
     for (let i = 0; i < buffer.length; i++) {
@@ -20,18 +18,13 @@ function mulawToPcm(buffer) {
     return pcm;
 }
 
-// Fixed STT: Using official multipart pattern
 async function transcribeAudio(mulawBuffer) {
+    if (!process.env.SARVAM_API_KEY) {
+        throw new Error('SARVAM_API_KEY is missing from environment variables');
+    }
     const pcmBuffer = mulawToPcm(mulawBuffer);
     const formData = new FormData();
-    
-    // Convert buffer to readable stream for robust API streaming
-    const audioStream = Readable.from(pcmBuffer);
-    
-    formData.append('file', audioStream, { 
-        filename: 'audio.pcm', 
-        contentType: 'audio/pcm' 
-    });
+    formData.append('file', Readable.from(pcmBuffer), { filename: 'audio.pcm', contentType: 'audio/pcm' });
     formData.append('model', 'saaras:v3');
     formData.append('language_code', 'ta-IN');
     formData.append('mode', 'transcribe');
@@ -58,7 +51,6 @@ function setupMediaStream(server) {
         let audioChunks = [];
         let silenceTimer = null;
         let isProcessing = false;
-
         ws.on('message', async (message) => {
             const data = JSON.parse(message);
             if (data.event === 'start') {
@@ -75,8 +67,8 @@ function setupMediaStream(server) {
                     audioChunks = [];
                     try {
                         const transcript = await transcribeAudio(mulawBuffer);
-                        if (transcript) console.log('Transcript:', transcript);
-                    } catch (err) { console.error('STT API Error:', err.message); }
+                        console.log('Transcript:', transcript);
+                    } catch (err) { console.error('STT API Error:', err.response?.data || err.message); }
                     isProcessing = false;
                 }, 500);
             }
@@ -90,7 +82,6 @@ async function sendTTSResponse(ws, text, streamSid) {
         const response = await axios.post('https://api.sarvam.ai/text-to-speech', {
             inputs: [text], target_language_code: 'ta-IN', speaker: 'anushka', model: 'bulbul:v2', encoding: 'MULAW', sample_rate: 8000
         }, { headers: { 'api-subscription-key': process.env.SARVAM_API_KEY, 'Content-Type': 'application/json' } });
-        
         if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload: response.data.audios[0] } }));
         }
