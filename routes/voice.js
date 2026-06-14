@@ -79,16 +79,13 @@ function setupMediaStream(server, io) {
                     } catch (error) { console.error('FULL ERROR', error); }
                     isProcessing = false;
                 }, 500);
-            }
-        });
-    });
+}); 
+    }); 
 
-    return wss;
-}
-
-return wss; 
+    return wss; 
 } 
 
+async function sendTTSResponse(ws, text, streamSid) {
 async function sendTTSResponse(ws, text, streamSid) {
     try {
         const ttsResponse = await axios.post('https://api.sarvam.ai/text-to-speech', {
