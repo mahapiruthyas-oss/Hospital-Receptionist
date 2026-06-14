@@ -6,24 +6,17 @@ const mongoose = require('mongoose');
 const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { SarvamAIClient } = require("sarvamai"); // Added SDK
+const { SarvamAIClient } = require("sarvamai");
 
 let Patient;
-
 const callSessions = {};
 
-// [FAQ Section remains unchanged...]
-const FAQS = [ /* ... as before ... */ ];
-function checkFAQ(text) { /* ... as before ... */ }
-
-// Initialize the client once at the top of your file (outside this function)
 const sarvamClient = new SarvamAIClient({ apiSubscriptionKey: process.env.SARVAM_API_KEY });
 
 router.post('/', (req, res) => {
-  const callSid = req.body.CallSid || req.body.callSid || 'unknown';
+  const callSid = (req.body && req.body.CallSid) || (req.body && req.body.callSid) || 'unknown';
   console.log('✅ Incoming call - CallSid:', callSid);
 
-  // Initialize session immediately
   callSessions[callSid] = { 
     hospitalId: 'H001', 
     collected: { name: null, mobile: null, doctor: null }, 
@@ -32,9 +25,7 @@ router.post('/', (req, res) => {
   };
 
   const host = req.headers.host;
-  
-  // Respond IMMEDIATELY with TwiML
- const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
     <Stream url="wss://${host}/voice/stream" />
@@ -50,8 +41,6 @@ function setupMediaStream(server, io) {
     const wss = new WebSocket.Server({ server, path: '/voice/stream' });
 
     wss.on('connection', (ws) => {
-        let callSid = null;
-        let streamSid = null;
         let audioChunks = [];
         let silenceTimer = null;
         let isProcessing = false;
@@ -59,8 +48,7 @@ function setupMediaStream(server, io) {
         ws.on('message', async (message) => {
             const data = JSON.parse(message);
             if (data.event === 'start') {
-                callSid = data.start.callSid;
-                streamSid = data.start.streamSid;
+                const streamSid = data.start.streamSid;
                 await sendTTSResponse(ws, 'வணக்கம்! இது ஸ்ரீ லட்சுமி மருத்துவமனை.', streamSid);
                 return;
             }
@@ -75,17 +63,16 @@ function setupMediaStream(server, io) {
                     try {
                         const patientText = await transcribeAudio(mulawBuffer);
                         console.log('Patient said:', patientText);
-                        // ... your existing LLM logic ...
                     } catch (error) { console.error('FULL ERROR', error); }
-isProcessing = false;
-    }, 500); 
-  }); 
-}); 
+                    isProcessing = false;
+                }, 500);
+            }
+        });
+    });
 
-return wss;
+    return wss;
 }
 
-async function sendTTSResponse(ws, text, streamSid) {
 async function sendTTSResponse(ws, text, streamSid) {
     try {
         const ttsResponse = await axios.post('https://api.sarvam.ai/text-to-speech', {
@@ -105,11 +92,10 @@ async function sendTTSResponse(ws, text, streamSid) {
                 streamSid, 
                 media: { payload: ttsResponse.data.audios[0] } 
             }));
-            console.log('✅ TTS audio sent');
         }
     } catch (error) { 
         console.error('❌ TTS error:', error.message); 
     }
 }
-// [sendTTSResponse and other helpers remain same...]
+
 module.exports = { router, setupMediaStream };
