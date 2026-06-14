@@ -46,61 +46,45 @@ router.post('/', (req, res) => {
 });
 
 function setupMediaStream(server, io) {
-  Patient = mongoose.model('Patient');
-  const wss = new WebSocket.Server({ server, path: '/voice/stream' });
+    Patient = mongoose.model('Patient');
+    const wss = new WebSocket.Server({ server, path: '/voice/stream' });
 
-  wss.on('connection', (ws) => {
-    let callSid = null;
-    let streamSid = null;
-    let audioChunks = [];
-    let silenceTimer = null;
-    let isProcessing = false;
+    wss.on('connection', (ws) => {
+        let callSid = null;
+        let streamSid = null;
+        let audioChunks = [];
+        let silenceTimer = null;
+        let isProcessing = false;
 
-    ws.on('message', async (message) => {
-      const data = JSON.parse(message);
-
-      if (data.event === 'start') {
-        callSid = data.start.callSid;
-        streamSid = data.start.streamSid;
-        console.log('Call started:', callSid);
-        await sendTTSResponse(ws, 'வணக்கம்! இது ஸ்ரீ லட்சுமி மருத்துவமனை.', streamSid);
-        return;
-      }
-        
-        silenceTimer = setTimeout(async () => {
-          if (audioBuffer.length < 5) { audioBuffer = []; return; }
-          isProcessing = true;
-          
-          const audioData = Buffer.from(audioBuffer.join(''), 'base64'); // Prepare Buffer for SDK
-          audioBuffer = [];
-
-          try {
-            console.log('Looking for session:', callSid);
-            const session = callSessions[callSid];
-            
-            if (!session) {
-              console.log('SESSION MISSING');
-              isProcessing = false;
-              return;
+        ws.on('message', async (message) => {
+            const data = JSON.parse(message);
+            if (data.event === 'start') {
+                callSid = data.start.callSid;
+                streamSid = data.start.streamSid;
+                await sendTTSResponse(ws, 'வணக்கம்! இது ஸ்ரீ லட்சுமி மருத்துவமனை.', streamSid);
+                return;
             }
+            if (data.event === 'media' && !isProcessing) {
+                audioChunks.push(Buffer.from(data.media.payload, 'base64'));
+                clearTimeout(silenceTimer);
+                silenceTimer = setTimeout(async () => {
+                    if (audioChunks.length < 10) { audioChunks = []; return; }
+                    isProcessing = true;
+                    const mulawBuffer = Buffer.concat(audioChunks);
+                    audioChunks = [];
+                    try {
+                        const patientText = await transcribeAudio(mulawBuffer);
+                        console.log('Patient said:', patientText);
+                        // ... your existing LLM logic ...
+                    } catch (error) { console.error('FULL ERROR', error); }
+                    isProcessing = false;
+                }, 500);
+            }
+        });
+    });
 
-            // STT using Official Sarvam SDK
-           // Perform STT using the corrected decoder function
-console.log('=== STT START (Decoded PCM) ===');
-const patientText = await transcribeAudio(mulawBuffer);
-console.log('Patient said:', patientText);
-
-            // ... LLM logic remains same ...
-            // [Ensure you use 'streamSid' for sendTTSResponse here]
-
-          } catch (error) {
-            console.error('FULL ERROR', error);
-          }
-          isProcessing = false;
-   }, 500);
-}, 500); 
-    }); 
-}); 
+    return wss;
+}
 
 return wss; 
 } 
