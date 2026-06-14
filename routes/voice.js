@@ -13,6 +13,11 @@ function mulawToPcm(buffer) {
         let e = (u & 0x70) >> 4;
         let b = (s + 0x84) << e;
         let v = (u & 0x80) ? (0x84 - b) : (b - 0x84);
+        
+        // Clamping to prevent integer overflow
+        if (v > 32767) v = 32767;
+        if (v < -32768) v = -32768;
+        
         pcm.writeInt16LE(v, i * 2);
     }
     return pcm;
