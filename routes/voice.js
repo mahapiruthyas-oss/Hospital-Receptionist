@@ -6,10 +6,7 @@ const mongoose = require('mongoose');
 const FormData = require('form-data');
 const { Readable } = require('stream');
 
-let Patient;
-const callSessions = {};
-
-// Helper: mu-law to PCM
+// Helper: Convert Telephony mu-law (8kHz) to Linear PCM (16-bit)
 function mulawToPcm(buffer) {
     const pcm = Buffer.alloc(buffer.length * 2);
     for (let i = 0; i < buffer.length; i++) {
@@ -23,13 +20,18 @@ function mulawToPcm(buffer) {
     return pcm;
 }
 
-// Fixed STT: Uses Readable stream and formData headers
+// Fixed STT: Using official multipart pattern
 async function transcribeAudio(mulawBuffer) {
     const pcmBuffer = mulawToPcm(mulawBuffer);
     const formData = new FormData();
+    
+    // Convert buffer to readable stream for robust API streaming
     const audioStream = Readable.from(pcmBuffer);
     
-    formData.append('file', audioStream, { filename: 'audio.pcm', contentType: 'audio/pcm', knownLength: pcmBuffer.length });
+    formData.append('file', audioStream, { 
+        filename: 'audio.pcm', 
+        contentType: 'audio/pcm' 
+    });
     formData.append('model', 'saaras:v3');
     formData.append('language_code', 'ta-IN');
     formData.append('mode', 'transcribe');
@@ -45,19 +47,12 @@ async function transcribeAudio(mulawBuffer) {
 }
 
 router.post('/', (req, res) => {
-    const callSid = (req.body && req.body.CallSid) || (req.body && req.body.callSid) || 'unknown';
     const host = req.headers.host;
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Connect>
-    <Stream url="wss://${host}/voice/stream" />
-  </Connect>
-</Response>`;
     res.type('text/xml');
-    res.send(twiml);
+    res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="wss://${host}/voice/stream" /></Connect></Response>`);
 });
 
-function setupMediaStream(server, io) {
+function setupMediaStream(server) {
     const wss = new WebSocket.Server({ server, path: '/voice/stream' });
     wss.on('connection', (ws) => {
         let audioChunks = [];
@@ -79,9 +74,9 @@ function setupMediaStream(server, io) {
                     const mulawBuffer = Buffer.concat(audioChunks);
                     audioChunks = [];
                     try {
-                        const patientText = await transcribeAudio(mulawBuffer);
-                        console.log('Patient said:', patientText);
-                    } catch (error) { console.error('STT Error:', error.message); }
+                        const transcript = await transcribeAudio(mulawBuffer);
+                        if (transcript) console.log('Transcript:', transcript);
+                    } catch (err) { console.error('STT API Error:', err.message); }
                     isProcessing = false;
                 }, 500);
             }
@@ -92,20 +87,14 @@ function setupMediaStream(server, io) {
 
 async function sendTTSResponse(ws, text, streamSid) {
     try {
-        const ttsResponse = await axios.post('https://api.sarvam.ai/text-to-speech', {
-            inputs: [text], 
-            target_language_code: 'ta-IN', 
-            speaker: 'anushka', 
-            model: 'bulbul:v2', 
-            encoding: 'MULAW', 
-            sample_rate: 8000
-        }, { 
-            headers: { 'api-subscription-key': process.env.SARVAM_API_KEY, 'Content-Type': 'application/json' } 
-        });
+        const response = await axios.post('https://api.sarvam.ai/text-to-speech', {
+            inputs: [text], target_language_code: 'ta-IN', speaker: 'anushka', model: 'bulbul:v2', encoding: 'MULAW', sample_rate: 8000
+        }, { headers: { 'api-subscription-key': process.env.SARVAM_API_KEY, 'Content-Type': 'application/json' } });
+        
         if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload: ttsResponse.data.audios[0] } }));
+            ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload: response.data.audios[0] } }));
         }
-    } catch (error) { console.error('TTS error:', error.message); }
+    } catch (err) { console.error('TTS API Error:', err.message); }
 }
 
 module.exports = { router, setupMediaStream };
