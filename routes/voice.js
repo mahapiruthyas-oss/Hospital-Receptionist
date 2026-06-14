@@ -85,22 +85,10 @@ function setupMediaStream(server, io) {
             }
 
             // STT using Official Sarvam SDK
-            console.log('=== STT START (SDK) ===');
-            
-            // Writing buffer to temp file as SDK expects a stream or file
-            const tempAudio = path.join('/tmp', `input_${Date.now()}.wav`);
-            fs.writeFileSync(tempAudio, audioData);
-            const audioReadStream = fs.createReadStream(tempAudio);
-
-            const sttResponse = await sarvamClient.speechToText.transcribe({
-              file: audioReadStream,
-              model: "saaras:v3",
-              mode: "transcribe"
-            });
-
-            console.log('=== STT DONE ===', sttResponse);
-            const patientText = sttResponse.transcript || '';
-            fs.unlinkSync(tempAudio); // Cleanup
+           // Perform STT using the corrected decoder function
+console.log('=== STT START (Decoded PCM) ===');
+const patientText = await transcribeAudio(mulawBuffer);
+console.log('Patient said:', patientText);
 
             // ... LLM logic remains same ...
             // [Ensure you use 'streamSid' for sendTTSResponse here]
