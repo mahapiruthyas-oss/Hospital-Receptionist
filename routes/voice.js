@@ -77,13 +77,13 @@ function setupMediaStream(server, io) {
                         console.log('Patient said:', patientText);
                         // ... your existing LLM logic ...
                     } catch (error) { console.error('FULL ERROR', error); }
-                    isProcessing = false;
-                }, 500);
+isProcessing = false;
+    }, 500); 
+  }); 
 }); 
-    
 
-    return wss; 
-} 
+return wss;
+}
 
 async function sendTTSResponse(ws, text, streamSid) {
 async function sendTTSResponse(ws, text, streamSid) {
