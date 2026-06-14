@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const WebSocket = require('ws');
-const mongoose = require('mongoose');
 const FormData = require('form-data');
 const { Readable } = require('stream');
 
@@ -22,7 +21,6 @@ function mulawToPcm(buffer) {
 async function transcribeAudio(mulawBuffer) {
     const pcmBuffer = mulawToPcm(mulawBuffer);
     const formData = new FormData();
-    // Corrected contentType to be compliant with Sarvam API validation
     formData.append('file', Readable.from(pcmBuffer), { 
         filename: 'audio.pcm', 
         contentType: 'audio/pcm_s16le' 
