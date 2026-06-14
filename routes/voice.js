@@ -5,6 +5,7 @@ const WebSocket = require('ws');
 const FormData = require('form-data');
 const { Readable } = require('stream');
 
+// Finalized Decoder: Clamps values to strictly valid 16-bit range
 function mulawToPcm(buffer) {
     const pcm = Buffer.alloc(buffer.length * 2);
     for (let i = 0; i < buffer.length; i++) {
@@ -14,11 +15,9 @@ function mulawToPcm(buffer) {
         let b = (s + 0x84) << e;
         let v = (u & 0x80) ? (0x84 - b) : (b - 0x84);
         
-        // Clamping to prevent integer overflow
-        if (v > 32767) v = 32767;
-        if (v < -32768) v = -32768;
-        
-        pcm.writeInt16LE(v, i * 2);
+        // Strict clamping prevents the "out of range" error and clipping noise
+        const clampedV = Math.max(-32768, Math.min(32767, v));
+        pcm.writeInt16LE(clampedV, i * 2);
     }
     return pcm;
 }
@@ -56,26 +55,33 @@ function setupMediaStream(server) {
         let audioChunks = [];
         let silenceTimer = null;
         let isProcessing = false;
+        let framesReceived = 0;
+
         ws.on('message', async (message) => {
             const data = JSON.parse(message);
             if (data.event === 'start') {
-                await sendTTSResponse(ws, 'வணக்கம்! இது ஸ்ரீ லட்சுமி மருத்துவமனை.', data.start.streamSid);
+                await sendTTSResponse(ws, 'வணக்கம்!', data.start.streamSid);
                 return;
             }
-            if (data.event === 'media' && !isProcessing) {
-                audioChunks.push(Buffer.from(data.media.payload, 'base64'));
-                clearTimeout(silenceTimer);
-                silenceTimer = setTimeout(async () => {
-                    if (audioChunks.length < 10) { audioChunks = []; return; }
-                    isProcessing = true;
-                    const mulawBuffer = Buffer.concat(audioChunks);
-                    audioChunks = [];
-                    try {
-                        const transcript = await transcribeAudio(mulawBuffer);
-                        console.log('Transcript:', transcript);
-                    } catch (err) { console.error('STT API Error:', err.message); }
-                    isProcessing = false;
-                }, 500);
+            if (data.event === 'media') {
+                // Ignore the first 20 frames to eliminate initialization "bang"
+                if (framesReceived < 20) { framesReceived++; return; }
+                
+                if (!isProcessing) {
+                    audioChunks.push(Buffer.from(data.media.payload, 'base64'));
+                    clearTimeout(silenceTimer);
+                    silenceTimer = setTimeout(async () => {
+                        if (audioChunks.length < 10) { audioChunks = []; return; }
+                        isProcessing = true;
+                        const mulawBuffer = Buffer.concat(audioChunks);
+                        audioChunks = [];
+                        try {
+                            const transcript = await transcribeAudio(mulawBuffer);
+                            if (transcript) console.log('Transcript:', transcript);
+                        } catch (err) { console.error('STT API Error:', err.message); }
+                        isProcessing = false;
+                    }, 500);
+                }
             }
         });
     });
