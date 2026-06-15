@@ -9,11 +9,12 @@ const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
 const TWILIO_SAMPLE_RATE = 8000;
 const SARVAM_STT_SAMPLE_RATE = 16000;
 const TWILIO_FRAME_MS = 20;
-const SPEECH_RMS_THRESHOLD = 450;
-const SILENCE_FRAMES_TO_END_UTTERANCE = 25; // About 500 ms for faster replies.
+const SPEECH_RMS_THRESHOLD = 350;
+const SILENCE_FRAMES_TO_END_UTTERANCE = 50; // About 1 second, allowing natural pauses.
+const POST_BOOKING_SILENCE_FRAMES_TO_END_UTTERANCE = 60; // About 1.2 seconds for FAQ questions.
 const MIN_SPEECH_FRAMES_FOR_STT = 18; // About 360 ms of actual voice.
 const LANGUAGE_MIN_SPEECH_FRAMES_FOR_STT = 6; // "Tamil" or "English" may be brief.
-const MOBILE_SILENCE_FRAMES_TO_END_UTTERANCE = 40; // About 800 ms between spoken digits.
+const MOBILE_SILENCE_FRAMES_TO_END_UTTERANCE = 50; // About 1 second between spoken digits.
 const MOBILE_MIN_SPEECH_FRAMES_FOR_STT = 4; // Short spoken digits must still reach STT.
 const POST_BOOKING_MIN_SPEECH_FRAMES_FOR_STT = 4; // Short questions such as "fees?" must reach STT.
 
@@ -243,32 +244,41 @@ async function transcribeAudio(mulawBuffer, languageCode = 'ta-IN') {
 
 const FAQS = [
   {
-    keywords: ['நேரம்', 'time', 'timing', 'open', 'திற'],
+    keywords: [
+      'நேரம்', 'எப்போது', 'எத்தனை மணிக்கு', 'திறந்திருக்கும்', 'செயல்படும் நேரம்',
+      'time', 'timing', 'timings', 'open', 'opening hours', 'working hours', 'what time'
+    ],
     tamil: 'புறநோயாளிகள் பிரிவு காலை எட்டு மணி முதல் ஒரு மணி வரையும், மாலை நான்கு மணி முதல் எட்டு மணி வரையும் செயல்படும்.',
     english: 'The outpatient department is open from 8 AM to 1 PM and from 4 PM to 8 PM.'
   },
   {
-    keywords: ['கட்டணம்', 'fee', 'fees', 'charge', 'cost', 'விலை', 'பணம்'],
+    keywords: [
+      'கட்டணம்', 'ஆலோசனைக் கட்டணம்', 'ஆலோசனை கட்டணம்', 'எவ்வளவு', 'விலை', 'பணம்', 'மருத்துவர் கட்டணம்',
+      'fee', 'fees', 'consultation fee', 'doctor fee', 'charge', 'charges', 'cost', 'how much', 'price', 'rate'
+    ],
     tamil: 'மருத்துவர் ஆலோசனைக் கட்டணம் முந்நூறு ரூபாய்.',
     english: 'The consultation fee is 300 rupees.'
   },
   {
-    keywords: ['எங்கே', 'where', 'location', 'address', 'வழி'],
+    keywords: [
+      'எங்கே', 'முகவரி', 'இடம்', 'வழி', 'எப்படி வருவது',
+      'where', 'location', 'address', 'directions', 'how to reach'
+    ],
     tamil: 'மருத்துவமனை சென்னை அண்ணா நகரில், அண்ணா நகர் கோபுரப் பேருந்து நிறுத்தத்திற்கு அருகில் உள்ளது.',
     english: 'The hospital is in Anna Nagar, Chennai, near the Anna Nagar Tower bus stop.'
   },
   {
-    keywords: ['emergency', 'urgent', 'அவசரம்'],
+    keywords: ['emergency', 'urgent', 'emergency number', 'ambulance', 'அவசரம்', 'அவசர எண்', 'அவசர உதவி'],
     tamil: 'அவசர உதவிக்கு பூஜ்ஜியம் நான்கு நான்கு, ஒன்று இரண்டு மூன்று நான்கு ஐந்து ஆறு ஏழு எட்டு என்ற எண்ணை அழைக்கவும்.',
     english: 'For emergency assistance, please call zero four four, one two three four five six seven eight.'
   },
   {
-    keywords: ['ஞாயிறு', 'sunday', 'holiday', 'விடுமுறை'],
+    keywords: ['ஞாயிறு', 'ஞாயிற்றுக்கிழமை', 'விடுமுறை', 'sunday', 'holiday', 'closed', 'weekend'],
     tamil: 'ஞாயிற்றுக்கிழமை புறநோயாளிகள் பிரிவு செயல்படாது. திங்கள் முதல் சனிக்கிழமை வரை செயல்படும்.',
     english: 'The outpatient department is closed on Sunday and open from Monday through Saturday.'
   },
   {
-    keywords: ['parking', 'பார்க்கிங்', 'வாகனம்'],
+    keywords: ['parking', 'car parking', 'bike parking', 'பார்க்கிங்', 'வாகனம்', 'வாகன நிறுத்தம்'],
     tamil: 'மருத்துவமனைக்கு முன்பாக இலவச வாகன நிறுத்துமிடம் உள்ளது.',
     english: 'Free parking is available in front of the hospital.'
   }
@@ -1042,9 +1052,12 @@ function setupMediaStream(server, io) {
           });
         }
 
-        const silenceFramesNeeded = session.lastAsked === 'mobile'
-          ? MOBILE_SILENCE_FRAMES_TO_END_UTTERANCE
-          : SILENCE_FRAMES_TO_END_UTTERANCE;
+        let silenceFramesNeeded = SILENCE_FRAMES_TO_END_UTTERANCE;
+        if (session.lastAsked === 'mobile') {
+          silenceFramesNeeded = MOBILE_SILENCE_FRAMES_TO_END_UTTERANCE;
+        } else if (session.lastAsked === 'post_booking') {
+          silenceFramesNeeded = POST_BOOKING_SILENCE_FRAMES_TO_END_UTTERANCE;
+        }
 
         if (heardSpeech && silenceFrameCount >= silenceFramesNeeded) {
           await processCallerAudio('caller paused');
@@ -1074,7 +1087,7 @@ async function synthesizeTTS(text, targetLanguageCode) {
     target_language_code: targetLanguageCode,
     speaker: 'ritu',
     model: 'bulbul:v3',
-    pace: 1.15,
+    pace: 1.0,
     temperature: 0.4,
     speech_sample_rate: String(TWILIO_SAMPLE_RATE),
     output_audio_codec: 'mulaw'
