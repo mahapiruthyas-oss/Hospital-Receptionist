@@ -3,84 +3,172 @@ const router = express.Router();
 const axios = require('axios');
 const WebSocket = require('ws');
 const FormData = require('form-data');
-const { Readable } = require('stream');
 
-// Finalized Decoder: Clamps values to strictly valid 16-bit range
-function mulawToPcm(buffer) {
-  const pcm = Buffer.alloc(buffer.length * 2);
-  for (let i = 0; i < buffer.length; i++) {
-    let u = buffer[i] ^ 0xff;
-    let s = (u & 0x0f) << 4;
-    let e = (u & 0x70) >> 4;
-    let b = (s + 0x84) << e;
-    let v = (u & 0x80) ? (0x84 - b) : (b - 0x84);
+const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
+const TWILIO_SAMPLE_RATE = 8000;
+const SARVAM_STT_SAMPLE_RATE = 16000;
 
-    // Strict clamping prevents the "out of range" error and clipping noise
-    const clampedV = Math.max(-32768, Math.min(32767, v));
-    pcm.writeInt16LE(clampedV, i * 2);
+function getSarvamHeaders() {
+  return { 'api-subscription-key': SARVAM_API_KEY };
+}
+
+function assertSarvamKey() {
+  if (!SARVAM_API_KEY) {
+    throw new Error('SARVAM_API_KEY is not set');
   }
+}
+
+function mulawToPcm16(buffer) {
+  const pcm = Buffer.alloc(buffer.length * 2);
+
+  for (let i = 0; i < buffer.length; i += 1) {
+    const uLaw = ~buffer[i] & 0xff;
+    const sign = uLaw & 0x80;
+    const exponent = (uLaw >> 4) & 0x07;
+    const mantissa = uLaw & 0x0f;
+    let sample = ((mantissa << 3) + 0x84) << exponent;
+    sample -= 0x84;
+
+    if (sign) sample = -sample;
+    pcm.writeInt16LE(Math.max(-32768, Math.min(32767, sample)), i * 2);
+  }
+
   return pcm;
 }
 
+function upsamplePcm16LeBy2(pcm8k) {
+  const pcm16k = Buffer.alloc(pcm8k.length * 2);
+  const sampleCount = pcm8k.length / 2;
+
+  for (let i = 0; i < sampleCount; i += 1) {
+    const current = pcm8k.readInt16LE(i * 2);
+    const next = i + 1 < sampleCount ? pcm8k.readInt16LE((i + 1) * 2) : current;
+    const midpoint = Math.round((current + next) / 2);
+    const outputOffset = i * 4;
+
+    pcm16k.writeInt16LE(current, outputOffset);
+    pcm16k.writeInt16LE(midpoint, outputOffset + 2);
+  }
+
+  return pcm16k;
+}
+
+function pcm16LeToWav(pcm, sampleRate) {
+  const header = Buffer.alloc(44);
+  const byteRate = sampleRate * 2;
+
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(pcm.length, 40);
+
+  return Buffer.concat([header, pcm]);
+}
+
 async function transcribeAudio(mulawBuffer) {
-  const pcmBuffer = mulawToPcm(mulawBuffer);
+  assertSarvamKey();
+
+  const pcm8k = mulawToPcm16(mulawBuffer);
+  const pcm16k = upsamplePcm16LeBy2(pcm8k);
+  const wavBuffer = pcm16LeToWav(pcm16k, SARVAM_STT_SAMPLE_RATE);
+
   const formData = new FormData();
-  formData.append('file', Readable.from(pcmBuffer), {
-    filename: 'audio.pcm',
-    contentType: 'audio/pcm_s16le'
+  formData.append('file', wavBuffer, {
+    filename: 'twilio-audio.wav',
+    contentType: 'audio/wav'
   });
   formData.append('model', 'saaras:v3');
   formData.append('language_code', 'ta-IN');
   formData.append('mode', 'transcribe');
-  formData.append('input_audio_codec', 'pcm_s16le');
 
   const res = await axios.post('https://api.sarvam.ai/speech-to-text', formData, {
     headers: {
-      'api-subscription-key': process.env.SARVAM_API_KEY,
+      ...getSarvamHeaders(),
       ...formData.getHeaders()
-    }
+    },
+    maxBodyLength: Infinity
   });
+
   return res.data.transcript || '';
 }
 
-// FAQ Interceptor — zero LLM cost
 const FAQS = [
   { keywords: ['நேரம்', 'time', 'timing', 'open', 'திற'], answer: 'OPD நேரம் காலை 8 மணி முதல் மதியம் 1 மணி வரை, மாலை 4 மணி முதல் இரவு 8 மணி வரை.' },
-  { keywords: ['கட்டணம்', 'fee', 'fees', 'charge', 'cost', 'விலை', 'பணம்'], answer: 'Consultation fee ₹300 மட்டுமே.' },
+  { keywords: ['கட்டணம்', 'fee', 'fees', 'charge', 'cost', 'விலை', 'பணம்'], answer: 'Consultation fee ரூபாய் 300 மட்டும்.' },
   { keywords: ['எங்கே', 'where', 'location', 'address', 'வழி'], answer: 'நாங்கள் Anna Nagar, Chennai-வில் இருக்கிறோம். அருகில் உள்ள bus stop Anna Nagar Tower.' },
   { keywords: ['emergency', 'urgent', 'அவசரம்'], answer: 'Emergency: 044-12345678. 24 மணி நேரமும் கிடைக்கும்.' },
-  { keywords: ['ஞாயிறு', 'sunday', 'holiday', 'விடுமுறை'], answer: 'ஞாயிற்றுக்கிழமை OPD இல்லை. திங்கள் முதல் சனி வரை மட்டுமே.' },
-  { keywords: ['doctor', 'டாக்டர்', 'யார்'], answer: 'எங்களிடம் Dr. Kumar (Cardiology), Dr. Priya (General Medicine), Dr. Rajan (Orthopedic) உள்ளனர்.' },
-  { keywords: ['parking', 'பார்க்கிங்'], answer: 'மருத்துவமனை முன்பே free parking கிடைக்கும்.' },
+  { keywords: ['ஞாயிறு', 'sunday', 'holiday', 'விடுமுறை'], answer: 'ஞாயிற்றுக்கிழமை OPD இல்லை. திங்கள் முதல் சனி வரை மட்டும்.' },
+  { keywords: ['doctor', 'டாக்டர்', 'யார்'], answer: 'எங்களிடம் Dr. Kumar Cardiology, Dr. Priya General Medicine, Dr. Rajan Orthopedic உள்ளனர்.' },
+  { keywords: ['parking', 'பார்க்கிங்'], answer: 'மருத்துவமனை முன்பே free parking கிடைக்கும்.' }
 ];
 
 function checkFAQ(text) {
   const lower = text.toLowerCase();
+
   for (const faq of FAQS) {
-    for (const keyword of faq.keywords) {
-      if (lower.includes(keyword.toLowerCase())) {
-        return faq.answer;
-      }
+    if (faq.keywords.some((keyword) => lower.includes(keyword.toLowerCase()))) {
+      return faq.answer;
     }
   }
+
   return null;
 }
 
-// System prompt for the booking LLM, rebuilt each turn with current state
 function buildSystemPrompt(session) {
   return `நீங்கள் ஸ்ரீ லட்சுமி மருத்துவமனையின் (Sri Lakshmi Hospital) AI வரவேற்பு உதவியாளர்.
 
 கிடைக்கும் டாக்டர்கள்: "Dr. Kumar" (Cardiology), "Dr. Priya" (General Medicine), "Dr. Rajan" (Orthopedic).
-OPD நேரம்: காலை 8-1 மணி, மாலை 4-8 மணி. ஞாயிறு விடுமுறை. Consultation fee ₹300.
+OPD நேரம்: காலை 8-1 மணி, மாலை 4-8 மணி. ஞாயிறு விடுமுறை. Consultation fee ரூபாய் 300.
 
 உங்கள் வேலை appointment booking மட்டும். நோயாளியிடம் பெயர், மொபைல் நம்பர், எந்த டாக்டரிடம் appointment வேண்டும் என்பதை மட்டும் கேட்டு சேகரிக்கவும். ஒரு நேரத்தில் ஒரே ஒரு கேள்வி மட்டும் கேளுங்கள்.
 
 இப்போது வரை சேகரிக்கப்பட்டது: ${JSON.stringify(session.collected)}
 
-உங்கள் பதில் STRICT JSON ஆக மட்டும் இருக்க வேண்டும், வேறு எந்த உரையும், markdown backticks-ம் சேர்க்க வேண்டாம்:
-{"extracted": {"name": null அல்லது "string", "mobile": null அல்லது "string", "doctor": null அல்லது "Dr. Kumar" அல்லது "Dr. Priya" அல்லது "Dr. Rajan"}, "reply": "தமிழில் சுருக்கமான பதில்", "complete": true அல்லது false}
+உங்கள் பதில் STRICT JSON ஆக மட்டும் இருக்க வேண்டும், markdown backticks சேர்க்க வேண்டாம்:
+{"extracted":{"name":null அல்லது "string","mobile":null அல்லது "string","doctor":null அல்லது "Dr. Kumar" அல்லது "Dr. Priya" அல்லது "Dr. Rajan"},"reply":"தமிழில் சுருக்கமான பதில்","complete":true அல்லது false}
 
 name, mobile, doctor மூன்றும் கிடைத்தவுடன் complete:true ஆக்கி, appointment confirm செய்த பதிலை reply-ல் கொடுங்கள்.`;
+}
+
+async function getAssistantReply(session, transcript) {
+  session.conversationHistory.push({ role: 'user', content: transcript });
+
+  const llmRes = await axios.post('https://api.sarvam.ai/v1/chat/completions', {
+    model: 'sarvam-m',
+    messages: [
+      { role: 'system', content: buildSystemPrompt(session) },
+      ...session.conversationHistory
+    ],
+    max_tokens: 300
+  }, {
+    headers: {
+      ...getSarvamHeaders(),
+      'Content-Type': 'application/json'
+    }
+  });
+
+  let raw = llmRes.data.choices?.[0]?.message?.content || '{}';
+  raw = raw.replace(/```json|```/g, '').trim();
+
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    console.error('LLM JSON parse failed, raw was:', raw);
+    return {
+      extracted: {},
+      reply: 'மன்னிக்கவும், மீண்டும் சொல்ல முடியுமா?',
+      complete: false
+    };
+  }
 }
 
 router.post('/', (req, res) => {
@@ -99,98 +187,81 @@ function setupMediaStream(server) {
     let framesReceived = 0;
     let streamSid = null;
 
-    // Per-call booking state — lives for the lifetime of this WS connection
-    let session = {
+    const session = {
       collected: { name: null, mobile: null, doctor: null },
       conversationHistory: []
     };
 
     ws.on('message', async (message) => {
-      const data = JSON.parse(message);
+      let data;
+      try {
+        data = JSON.parse(message);
+      } catch (err) {
+        console.error('Invalid Twilio websocket message:', err.message);
+        return;
+      }
 
       if (data.event === 'start') {
         streamSid = data.start.streamSid;
+        framesReceived = 0;
         console.log('Call started, streamSid:', streamSid);
         await sendTTSResponse(ws, 'வணக்கம்! இது ஸ்ரீ லட்சுமி மருத்துவமனை. நான் உங்களுக்கு எப்படி உதவ முடியும்?', streamSid);
         return;
       }
 
-      if (data.event === 'media') {
-        // Ignore the first 20 frames to eliminate initialization "bang"
-        if (framesReceived < 20) { framesReceived++; return; }
+      if (data.event === 'media' && !isProcessing) {
+        if (framesReceived < 5) {
+          framesReceived += 1;
+          return;
+        }
 
-        if (!isProcessing) {
-          audioChunks.push(Buffer.from(data.media.payload, 'base64'));
-          clearTimeout(silenceTimer);
-          silenceTimer = setTimeout(async () => {
-            if (audioChunks.length < 10) { audioChunks = []; return; }
+        audioChunks.push(Buffer.from(data.media.payload, 'base64'));
+        clearTimeout(silenceTimer);
 
-            isProcessing = true;
-            const mulawBuffer = Buffer.concat(audioChunks);
+        silenceTimer = setTimeout(async () => {
+          if (audioChunks.length < 20) {
             audioChunks = [];
+            return;
+          }
 
-            try {
-              const transcript = await transcribeAudio(mulawBuffer);
-              if (transcript) console.log('Transcript:', transcript);
+          isProcessing = true;
+          const mulawBuffer = Buffer.concat(audioChunks);
+          audioChunks = [];
 
-              if (transcript && transcript.trim()) {
-                // FAQ check first — zero LLM cost
-                const faqAnswer = checkFAQ(transcript);
-                if (faqAnswer) {
-                  await sendTTSResponse(ws, faqAnswer, streamSid);
-                } else {
-                  session.conversationHistory.push({ role: 'user', content: transcript });
+          try {
+            const transcript = await transcribeAudio(mulawBuffer);
+            const cleanedTranscript = transcript.trim();
 
-                  const llmRes = await axios.post('https://api.sarvam.ai/v1/chat/completions', {
-                    model: 'sarvam-m',
-                    messages: [
-                      { role: 'system', content: buildSystemPrompt(session) },
-                      ...session.conversationHistory
-                    ],
-                    max_tokens: 300
-                  }, {
-                    headers: {
-                      'api-subscription-key': process.env.SARVAM_API_KEY,
-                      'Content-Type': 'application/json'
-                    }
-                  });
+            if (cleanedTranscript) {
+              console.log('Transcript:', cleanedTranscript);
 
-                  let raw = llmRes.data.choices?.[0]?.message?.content || '{}';
-                  raw = raw.replace(/```json|```/g, '').trim();
+              const faqAnswer = checkFAQ(cleanedTranscript);
+              if (faqAnswer) {
+                await sendTTSResponse(ws, faqAnswer, streamSid);
+              } else {
+                const parsed = await getAssistantReply(session, cleanedTranscript);
+                const extracted = parsed.extracted || {};
 
-                  let parsed;
-                  try {
-                    parsed = JSON.parse(raw);
-                  } catch (e) {
-                    console.error('LLM JSON parse failed, raw was:', raw);
-                    parsed = { extracted: {}, reply: 'மன்னிக்கவும், மீண்டும் சொல்ல முடியுமா?', complete: false };
-                  }
+                if (extracted.name) session.collected.name = extracted.name;
+                if (extracted.mobile) session.collected.mobile = extracted.mobile;
+                if (extracted.doctor) session.collected.doctor = extracted.doctor;
 
-                  const extracted = parsed.extracted || {};
-                  if (extracted.name) session.collected.name = extracted.name;
-                  if (extracted.mobile) session.collected.mobile = extracted.mobile;
-                  if (extracted.doctor) session.collected.doctor = extracted.doctor;
+                session.conversationHistory.push({ role: 'assistant', content: parsed.reply || '' });
+                session.conversationHistory = session.conversationHistory.slice(-10);
 
-                  session.conversationHistory.push({ role: 'assistant', content: parsed.reply || '' });
-                  if (session.conversationHistory.length > 10) {
-                    session.conversationHistory = session.conversationHistory.slice(-10);
-                  }
+                await sendTTSResponse(ws, parsed.reply || 'மன்னிக்கவும், மீண்டும் சொல்லுங்கள்.', streamSid);
 
-                  await sendTTSResponse(ws, parsed.reply || 'மன்னிக்கவும், மீண்டும் சொல்லுங்கள்.', streamSid);
-
-                  if (parsed.complete) {
-                    console.log('✅ Booking complete:', session.collected);
-                    // TODO: save to MongoDB once Patient model is wired back into this file
-                  }
+                if (parsed.complete) {
+                  console.log('Booking complete:', session.collected);
                 }
               }
-            } catch (err) {
-              console.error('Processing error:', err.response?.data || err.message);
             }
-
+          } catch (err) {
+            console.error('Processing error:', err.response?.data || err.message);
+          } finally {
             isProcessing = false;
-          }, 500);
-        }
+          }
+        }, 800);
       }
 
       if (data.event === 'stop') {
@@ -199,7 +270,10 @@ function setupMediaStream(server) {
       }
     });
 
-    ws.on('close', () => console.log('Stream disconnected'));
+    ws.on('close', () => {
+      clearTimeout(silenceTimer);
+      console.log('Stream disconnected');
+    });
   });
 
   return wss;
@@ -207,36 +281,39 @@ function setupMediaStream(server) {
 
 async function sendTTSResponse(ws, text, streamSid) {
   try {
-    console.log('🎤 TTS Text:', text.substring(0, 80));
+    assertSarvamKey();
+    console.log('TTS Text:', text.substring(0, 80));
 
     const response = await axios.post('https://api.sarvam.ai/text-to-speech', {
-      inputs: [text],
+      text,
       target_language_code: 'ta-IN',
       speaker: 'anushka',
       model: 'bulbul:v2',
-      encoding: 'MULAW',
-      sample_rate: 8000
+      speech_sample_rate: String(TWILIO_SAMPLE_RATE),
+      output_audio_codec: 'mulaw',
+      enable_preprocessing: true
     }, {
       headers: {
-        'api-subscription-key': process.env.SARVAM_API_KEY,
+        ...getSarvamHeaders(),
         'Content-Type': 'application/json'
       }
     });
 
     const audioBase64 = response.data.audios?.[0];
     if (!audioBase64) {
-      console.error('❌ TTS returned no audio. Full response:', JSON.stringify(response.data));
+      console.error('TTS returned no audio. Full response:', JSON.stringify(response.data));
       return;
     }
 
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload: audioBase64 } }));
-      console.log('✅ TTS audio sent, streamSid:', streamSid);
+      ws.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: `tts-${Date.now()}` } }));
+      console.log('TTS audio sent, streamSid:', streamSid);
     } else {
-      console.error('❌ TTS not sent — WebSocket not open. readyState:', ws.readyState);
+      console.error('TTS not sent. WebSocket not open. readyState:', ws.readyState);
     }
   } catch (err) {
-    console.error('❌ TTS API Error:', err.response?.data || err.message);
+    console.error('TTS API Error:', err.response?.data || err.message);
   }
 }
 
