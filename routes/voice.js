@@ -10,10 +10,10 @@ const TWILIO_SAMPLE_RATE = 8000;
 const SARVAM_STT_SAMPLE_RATE = 16000;
 const TWILIO_FRAME_MS = 20;
 const SPEECH_RMS_THRESHOLD = 450;
-const SILENCE_FRAMES_TO_END_UTTERANCE = 35; // About 700 ms.
+const SILENCE_FRAMES_TO_END_UTTERANCE = 25; // About 500 ms for faster replies.
 const MIN_SPEECH_FRAMES_FOR_STT = 18; // About 360 ms of actual voice.
 const LANGUAGE_MIN_SPEECH_FRAMES_FOR_STT = 6; // "Tamil" or "English" may be brief.
-const MOBILE_SILENCE_FRAMES_TO_END_UTTERANCE = 50; // Give callers more time between digits.
+const MOBILE_SILENCE_FRAMES_TO_END_UTTERANCE = 40; // About 800 ms between spoken digits.
 const MOBILE_MIN_SPEECH_FRAMES_FOR_STT = 4; // Short spoken digits must still reach STT.
 
 const DOCTORS = [
@@ -72,13 +72,16 @@ function getPatientModel() {
   return mongoose.model('Patient', patientSchema);
 }
 
-async function saveAppointment(collected) {
+async function saveAppointmentWithDetails(collected) {
   const payload = buildAppointmentPayload(collected);
 
   if (externalAppointmentSaver) {
     const savedPatient = await externalAppointmentSaver(payload);
     console.log('Appointment saved using injected saver:', savedPatient || payload);
-    return true;
+    return {
+      saved: true,
+      tokenNumber: savedPatient?.tokenNumber ?? savedPatient?.token ?? null
+    };
   }
 
   if (process.env.APPOINTMENT_WEBHOOK_URL) {
@@ -89,7 +92,10 @@ async function saveAppointment(collected) {
 
     const response = await axios.post(process.env.APPOINTMENT_WEBHOOK_URL, payload, { headers });
     console.log('Appointment saved using APPOINTMENT_WEBHOOK_URL:', response.data || payload);
-    return true;
+    return {
+      saved: true,
+      tokenNumber: response.data?.tokenNumber ?? response.data?.token ?? null
+    };
   }
 
   if (mongoose.connection.readyState !== 1) {
@@ -97,7 +103,7 @@ async function saveAppointment(collected) {
       readyState: mongoose.connection.readyState,
       payload
     });
-    return false;
+    return { saved: false, tokenNumber: null };
   }
 
   const Patient = getPatientModel();
@@ -116,7 +122,12 @@ async function saveAppointment(collected) {
   }
 
   console.log('Appointment saved to MongoDB:', patient);
-  return true;
+  return { saved: true, tokenNumber: patient.tokenNumber ?? null };
+}
+
+async function saveAppointment(collected) {
+  const result = await saveAppointmentWithDetails(collected);
+  return result.saved;
 }
 function mulawToPcm16(buffer) {
   const pcm = Buffer.alloc(buffer.length * 2);
@@ -288,6 +299,43 @@ function userIsAskingForDoctorList(text) {
 function isThanksOrGoodbye(text) {
   const lower = text.toLowerCase();
   return ['thank', 'thanks', 'thank you', 'nandri', 'நன்றி', 'ok', 'okay', 'seri', 'சரி', 'bye'].some((word) => lower.includes(word));
+}
+
+function hasNoMoreQueries(text) {
+  const lower = text.toLowerCase().replace(/[.,!?]/g, ' ').replace(/\s+/g, ' ').trim();
+  return isThanksOrGoodbye(lower) || [
+    'no', 'no queries', 'no query', 'nothing', 'nothing else', 'thats all', "that's all",
+    'no thank you', 'no thanks', 'வேண்டாம்', 'வேறு எதுவும் இல்லை', 'ஒன்றும் இல்லை', 'அவ்வளவுதான்'
+  ].some((phrase) => lower === phrase || lower.includes(phrase));
+}
+
+function isTokenNumberQuestion(text) {
+  const lower = text.toLowerCase();
+  return ['token', 'token number', 'டோக்கன்', 'வரிசை எண்', 'எனது எண்'].some((phrase) => lower.includes(phrase));
+}
+
+function getPostBookingQuestion(language) {
+  return language === 'en-IN'
+    ? 'Do you have any other questions? You can also ask for your token number.'
+    : 'வேறு ஏதேனும் கேள்விகள் உள்ளனவா? உங்கள் வரிசை எண்ணையும் கேட்கலாம்.';
+}
+
+function getTokenReply(session) {
+  if (session.tokenNumber !== null && session.tokenNumber !== undefined) {
+    return session.language === 'en-IN'
+      ? `Your token number is ${session.tokenNumber}.`
+      : `உங்கள் வரிசை எண் ${session.tokenNumber}.`;
+  }
+
+  return session.language === 'en-IN'
+    ? 'Your appointment is registered, but the token number is not available yet.'
+    : 'உங்கள் சந்திப்பு பதிவு செய்யப்பட்டுள்ளது. வரிசை எண் இன்னும் கிடைக்கவில்லை.';
+}
+
+function getCallClosingReply(language) {
+  return language === 'en-IN'
+    ? 'Thank you for calling Sri Lakshmi Hospital. Have a good day.'
+    : 'ஸ்ரீ லட்சுமி மருத்துவமனையை அழைத்ததற்கு நன்றி. உங்கள் நாள் இனிதாக அமையட்டும்.';
 }
 
 function detectLanguagePreference(text) {
@@ -623,7 +671,7 @@ async function getAssistantReply(session, transcript) {
       { role: 'system', content: buildSystemPrompt(session) },
       ...session.conversationHistory
     ],
-    max_tokens: 300,
+    max_tokens: 180,
     temperature: 0.2,
     response_format: { type: 'json_object' }
   }, {
@@ -678,7 +726,9 @@ function setupMediaStream(server, io) {
       closeAfterPlayback: false,
       saved: false,
       language: null,
-      mobileDigits: ''
+      mobileDigits: '',
+      bookingComplete: false,
+      tokenNumber: null
     };
 
     function resetCallerAudio() {
@@ -694,15 +744,20 @@ function setupMediaStream(server, io) {
 
     async function completeBookingAndReply(replyText) {
       if (!session.saved) {
-        session.saved = await saveAppointment(session.collected);
+        const saveResult = await saveAppointmentWithDetails(session.collected);
+        session.saved = saveResult.saved;
+        session.tokenNumber = saveResult.tokenNumber;
       }
 
-      session.completed = true;
-      endCallAfterPlayback();
-      const closingText = session.language === 'en-IN'
-        ? `${replyText} Thank you. I will end the call now.`
-        : `${replyText} நன்றி. இப்போது அழைப்பை நிறைவு செய்கிறேன்.`;
-      await sendTTSResponse(ws, closingText, streamSid, startBotSpeakingWindow, session.language);
+      session.bookingComplete = true;
+      session.lastAsked = 'post_booking';
+      await sendTTSResponse(
+        ws,
+        `${replyText} ${getPostBookingQuestion(session.language)}`,
+        streamSid,
+        startBotSpeakingWindow,
+        session.language
+      );
       console.log('Booking complete:', session.collected, 'saved:', session.saved);
     }
 
@@ -768,8 +823,50 @@ function setupMediaStream(server, io) {
           return;
         }
 
-        if (session.completed && isThanksOrGoodbye(cleanedTranscript)) {
-          endCallAfterPlayback();
+        if (session.bookingComplete) {
+          if (hasNoMoreQueries(cleanedTranscript)) {
+            session.completed = true;
+            endCallAfterPlayback();
+            await sendTTSResponse(
+              ws,
+              getCallClosingReply(session.language),
+              streamSid,
+              startBotSpeakingWindow,
+              session.language
+            );
+            return;
+          }
+
+          if (isTokenNumberQuestion(cleanedTranscript)) {
+            await sendTTSResponse(
+              ws,
+              `${getTokenReply(session)} ${getPostBookingQuestion(session.language)}`,
+              streamSid,
+              startBotSpeakingWindow,
+              session.language
+            );
+            return;
+          }
+
+          const postBookingFaq = checkFAQ(cleanedTranscript, session.language);
+          if (postBookingFaq) {
+            await sendTTSResponse(
+              ws,
+              `${postBookingFaq} ${getPostBookingQuestion(session.language)}`,
+              streamSid,
+              startBotSpeakingWindow,
+              session.language
+            );
+            return;
+          }
+
+          await sendTTSResponse(
+            ws,
+            getPostBookingQuestion(session.language),
+            streamSid,
+            startBotSpeakingWindow,
+            session.language
+          );
           return;
         }
 
@@ -968,9 +1065,9 @@ async function synthesizeTTS(text, targetLanguageCode) {
   const response = await axios.post('https://api.sarvam.ai/text-to-speech', {
     text,
     target_language_code: targetLanguageCode,
-    speaker: 'priya',
+    speaker: 'neha',
     model: 'bulbul:v3',
-    pace: 0.92,
+    pace: 1.05,
     temperature: 0.4,
     speech_sample_rate: String(TWILIO_SAMPLE_RATE),
     output_audio_codec: 'mulaw'
@@ -1004,8 +1101,10 @@ function sendAudioToTwilio(ws, audioBase64, streamSid, beforeSend) {
 async function sendBilingualTTSResponse(ws, tamilText, englishText, streamSid, beforeSend) {
   try {
     console.log('Bilingual TTS Text:', `${tamilText} ${englishText}`.substring(0, 160));
-    const tamilAudio = await synthesizeTTS(tamilText, 'ta-IN');
-    const englishAudio = await synthesizeTTS(englishText, 'en-IN');
+    const [tamilAudio, englishAudio] = await Promise.all([
+      synthesizeTTS(tamilText, 'ta-IN'),
+      synthesizeTTS(englishText, 'en-IN')
+    ]);
 
     if (!tamilAudio || !englishAudio) {
       console.error('Bilingual TTS returned no audio.');
