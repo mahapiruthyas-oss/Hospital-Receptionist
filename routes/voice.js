@@ -23,7 +23,7 @@ const DOCTORS = [
 ];
 
 const LANGUAGE_SELECTION_PROMPT_TAMIL = 'வணக்கம். இது ஸ்ரீ லட்சுமி மருத்துவமனை. நீங்கள் தமிழ் அல்லது ஆங்கிலம், எந்த மொழியில் பேச விரும்புகிறீர்கள்?';
-const LANGUAGE_SELECTION_PROMPT_ENGLISH = 'Hello. This is Sri Lakshmi Hospital. Would you prefer Tamil or English?';
+const LANGUAGE_SELECTION_PROMPT_ENGLISH = 'Hello. This is Sri Lakshmi Hospital. Would you like to speak in Tamil, or English?';
 let externalAppointmentSaver = null;
 let socketIo = null;
 
@@ -299,7 +299,7 @@ function detectLanguagePreference(text) {
 
 function getDoctorListReply(language) {
   if (language === 'en-IN') {
-    return 'We have Dr. Kumar for Cardiology, Dr. Priya for General Medicine, and Dr. Rajan for Orthopedics. Which doctor would you like to see?';
+    return 'We have Doctor Kumar for Cardiology. Doctor Priya for General Medicine. And Doctor Rajan for Orthopedics. Which doctor would you like to see?';
   }
   return 'எங்களிடம் இதய மருத்துவர் டாக்டர் குமார், பொது மருத்துவர் டாக்டர் பிரியா, எலும்பு மருத்துவர் டாக்டர் ராஜன் உள்ளனர். எந்த மருத்துவரைச் சந்திக்க விரும்புகிறீர்கள்?';
 }
@@ -307,13 +307,68 @@ function getDoctorListReply(language) {
 function getDoctorSpokenName(doctorName, language) {
   const doctor = DOCTORS.find((item) => item.name === doctorName);
   if (!doctor) return doctorName;
-  return language === 'en-IN' ? doctor.name : doctor.spokenName;
+  return language === 'en-IN' ? doctor.name.replace(/^Dr\./, 'Doctor') : doctor.spokenName;
 }
 
 function getRetryReply(session) {
   return session.language === 'en-IN'
     ? 'Sorry, please say that again.'
     : 'மன்னிக்கவும், மீண்டும் ஒருமுறை கூறுங்கள்.';
+}
+
+function isNameClarificationRequest(text) {
+  const normalized = text
+    .toLowerCase()
+    .replace(/[.,!?;:()[\]{}"']/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!normalized) return true;
+
+  const exactPhrases = [
+    'what', 'what sorry', 'sorry', 'sorry what', 'pardon', 'excuse me',
+    'come again', 'say again', 'repeat', 'please repeat', 'can you repeat',
+    'could you repeat', 'i did not understand', 'i didnt understand',
+    'i don t understand', 'not clear', 'hello', 'yes', 'no', 'okay', 'ok',
+    'என்ன', 'மன்னிக்கவும்', 'மீண்டும் சொல்லுங்கள்', 'புரியவில்லை', 'கேட்கவில்லை'
+  ];
+
+  if (exactPhrases.includes(normalized)) return true;
+
+  return [
+    'what did you say',
+    'what are you asking',
+    'did not hear',
+    'didnt hear',
+    'do not understand',
+    'don t understand',
+    'repeat the question'
+  ].some((phrase) => normalized.includes(phrase));
+}
+
+function isPlausiblePatientName(text) {
+  const cleaned = text.replace(/\s+/g, ' ').trim();
+  if (!cleaned || isNameClarificationRequest(cleaned)) return false;
+  if (extractDoctor(cleaned) || extractMobile(cleaned)) return false;
+  if (cleaned.length < 2 || cleaned.length > 40) return false;
+
+  const words = cleaned.split(' ').filter(Boolean);
+  if (words.length > 4) return false;
+  if (!words.every((word) => /^[A-Za-z\u0B80-\u0BFF.-]+$/.test(word))) return false;
+
+  return true;
+}
+
+function getNameQuestionReply(session, misunderstood = false) {
+  if (session.language === 'en-IN') {
+    return misunderstood
+      ? 'I am asking for your name. Please tell me your full name.'
+      : 'Please tell me your name.';
+  }
+
+  return misunderstood
+    ? 'உங்கள் பெயரைக் கேட்டேன். உங்கள் முழுப் பெயரைக் கூறுங்கள்.'
+    : 'உங்கள் பெயரைக் கூறுங்கள்.';
 }
 
 function normalizeNumberWordToken(token) {
@@ -471,8 +526,7 @@ function maybeExtractNameFromAnswer(session, text) {
     .replace(/[.,!?]/g, '')
     .trim();
 
-  if (!cleaned || extractDoctor(cleaned) || extractMobile(cleaned)) return null;
-  if (cleaned.length > 40) return null;
+  if (!isPlausiblePatientName(cleaned)) return null;
   return cleaned;
 }
 
@@ -490,7 +544,7 @@ function nextBookingQuestion(session) {
   if (!session.collected.name) {
     session.lastAsked = 'name';
     return english
-      ? `Your appointment with ${doctorName} is selected. What is your name?`
+      ? `${doctorName} is selected. Please tell me your name.`
       : `${doctorName} அவர்களைச் சந்திக்கத் தேர்வு செய்துள்ளீர்கள். உங்கள் பெயர் என்ன?`;
   }
 
@@ -551,6 +605,7 @@ OPD timing: காலை 8 to 1, மாலை 4 to 8. Sunday closed. Consultatio
 
 Your main job is appointment booking. Collect only doctor, patient name, and mobile number. Ask one question at a time.
 Never try to extract or discuss anything except digits while the requested field is mobile.
+When the requested field is name, words such as "what", "sorry", "pardon", "repeat", "hello", "yes", "no", and questions are not names. Do not extract them. Repeat the name question instead.
 
 Collected so far: ${JSON.stringify(session.collected)}
 Requested field: ${session.lastAsked || 'none'}
@@ -707,7 +762,7 @@ function setupMediaStream(server, io) {
           session.lastAsked = 'doctor';
           session.conversationHistory = [];
           const welcome = selectedLanguage === 'en-IN'
-            ? 'Thank you. We can continue in English. Which doctor would you like to book an appointment with?'
+            ? 'Thank you. We will continue in English. Which doctor would you like to see?'
             : 'நன்றி. தமிழில் தொடரலாம். எந்த மருத்துவரைச் சந்திக்க விரும்புகிறீர்கள்?';
           await sendTTSResponse(ws, welcome, streamSid, startBotSpeakingWindow, selectedLanguage);
           return;
@@ -725,6 +780,18 @@ function setupMediaStream(server, io) {
           } else {
             await sendTTSResponse(ws, mobileUpdate.reply, streamSid, startBotSpeakingWindow, session.language);
           }
+          return;
+        }
+
+        if (session.lastAsked === 'name' && !session.collected.name && isNameClarificationRequest(cleanedTranscript)) {
+          console.log('Caller asked for the name question to be repeated:', cleanedTranscript);
+          await sendTTSResponse(
+            ws,
+            getNameQuestionReply(session, true),
+            streamSid,
+            startBotSpeakingWindow,
+            session.language
+          );
           return;
         }
 
@@ -753,14 +820,27 @@ function setupMediaStream(server, io) {
         const parsed = await getAssistantReply(session, cleanedTranscript);
         const extracted = parsed.extracted || {};
 
-        if (extracted.name) session.collected.name = extracted.name;
+        if (extracted.name && isPlausiblePatientName(extracted.name)) {
+          session.collected.name = extracted.name.trim();
+        } else if (extracted.name) {
+          console.log('Rejected invalid name returned by assistant:', extracted.name);
+          extracted.name = null;
+        }
         if (extracted.mobile) session.collected.mobile = extracted.mobile;
         if (extracted.doctor) session.collected.doctor = extracted.doctor;
 
         session.conversationHistory.push({ role: 'assistant', content: parsed.reply || '' });
         session.conversationHistory = session.conversationHistory.slice(-10);
 
-        if (parsed.complete && session.collected.name && session.collected.mobile && session.collected.doctor) {
+        if (session.lastAsked === 'name' && !session.collected.name) {
+          await sendTTSResponse(
+            ws,
+            getNameQuestionReply(session, isNameClarificationRequest(cleanedTranscript)),
+            streamSid,
+            startBotSpeakingWindow,
+            session.language
+          );
+        } else if (parsed.complete && session.collected.name && session.collected.mobile && session.collected.doctor) {
           await completeBookingAndReply(parsed.reply || nextBookingQuestion(session));
         } else {
           await sendTTSResponse(ws, parsed.reply || getRetryReply(session), streamSid, startBotSpeakingWindow, session.language);
@@ -888,11 +968,12 @@ async function synthesizeTTS(text, targetLanguageCode) {
   const response = await axios.post('https://api.sarvam.ai/text-to-speech', {
     text,
     target_language_code: targetLanguageCode,
-    speaker: 'anushka',
-    model: 'bulbul:v2',
+    speaker: 'priya',
+    model: 'bulbul:v3',
+    pace: 0.92,
+    temperature: 0.4,
     speech_sample_rate: String(TWILIO_SAMPLE_RATE),
-    output_audio_codec: 'mulaw',
-    enable_preprocessing: true
+    output_audio_codec: 'mulaw'
   }, {
     headers: {
       ...getSarvamHeaders(),
