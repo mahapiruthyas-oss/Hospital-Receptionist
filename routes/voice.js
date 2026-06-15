@@ -12,6 +12,14 @@ const SPEECH_RMS_THRESHOLD = 450;
 const SILENCE_FRAMES_TO_END_UTTERANCE = 35; // About 700 ms.
 const MIN_SPEECH_FRAMES_FOR_STT = 18; // About 360 ms of actual voice.
 
+const DOCTORS = [
+  { name: 'Dr. Kumar', department: 'Cardiology', aliases: ['kumar', 'குமார்', 'குமாரு', 'cardiology', 'கார்டியாலஜி', 'heart', 'இதயம்'] },
+  { name: 'Dr. Priya', department: 'General Medicine', aliases: ['priya', 'பிரியா', 'general medicine', 'ஜெனரல்', 'medicine', 'மெடிசின்'] },
+  { name: 'Dr. Rajan', department: 'Orthopedic', aliases: ['rajan', 'ராஜன்', 'ராஜா', 'orthopedic', 'ortho', 'ஆர்த்தோ', 'எலும்பு'] }
+];
+
+const DOCTOR_LIST_REPLY = 'எங்களிடம் Dr. Kumar, இதய மருத்துவம். Dr. Priya, பொது மருத்துவம். Dr. Rajan, எலும்பு மருத்துவம். யாரிடம் appointment வேண்டும்?';
+
 function getSarvamHeaders() {
   return { 'api-subscription-key': SARVAM_API_KEY };
 }
@@ -139,7 +147,6 @@ const FAQS = [
   { keywords: ['எங்கே', 'where', 'location', 'address', 'வழி'], answer: 'நாங்கள் Anna Nagar, Chennai-வில் இருக்கிறோம். அருகில் உள்ள bus stop Anna Nagar Tower.' },
   { keywords: ['emergency', 'urgent', 'அவசரம்'], answer: 'Emergency: 044-12345678. 24 மணி நேரமும் கிடைக்கும்.' },
   { keywords: ['ஞாயிறு', 'sunday', 'holiday', 'விடுமுறை'], answer: 'ஞாயிற்றுக்கிழமை OPD இல்லை. திங்கள் முதல் சனி வரை மட்டும்.' },
-  { keywords: ['doctor', 'டாக்டர்', 'யார்'], answer: 'எங்களிடம் Dr. Kumar Cardiology, Dr. Priya General Medicine, Dr. Rajan Orthopedic உள்ளனர்.' },
   { keywords: ['parking', 'பார்க்கிங்'], answer: 'மருத்துவமனை முன்பே free parking கிடைக்கும்.' }
 ];
 
@@ -155,10 +162,94 @@ function checkFAQ(text) {
   return null;
 }
 
+function extractDoctor(text) {
+  const lower = text.toLowerCase();
+  return DOCTORS.find((doctor) => doctor.aliases.some((alias) => lower.includes(alias.toLowerCase()))) || null;
+}
+
+function userIsAskingForDoctorList(text) {
+  const lower = text.toLowerCase();
+  const asksForDoctor = ['doctor', 'doctors', 'டாக்டர்', 'டாக்டர்கள்', 'யார்', 'available', 'list'].some((word) => lower.includes(word));
+  return asksForDoctor && !extractDoctor(text);
+}
+
+function extractMobile(text) {
+  const digits = text.replace(/\D/g, '');
+  const match = digits.match(/[6-9]\d{9}/);
+  return match ? match[0] : null;
+}
+
+function maybeExtractNameFromAnswer(session, text) {
+  if (session.lastAsked !== 'name' || session.collected.name) return null;
+
+  const cleaned = text
+    .replace(/my name is/ig, '')
+    .replace(/name is/ig, '')
+    .replace(/என் பெயர்/g, '')
+    .replace(/பெயர்/g, '')
+    .replace(/[.,!?]/g, '')
+    .trim();
+
+  if (!cleaned || extractDoctor(cleaned) || extractMobile(cleaned)) return null;
+  if (cleaned.length > 40) return null;
+  return cleaned;
+}
+
+function nextBookingQuestion(session) {
+  if (!session.collected.doctor) {
+    session.lastAsked = 'doctor';
+    return 'எந்த டாக்டரிடம் appointment வேண்டும்? Dr. Kumar, இதய மருத்துவம். Dr. Priya, பொது மருத்துவம். Dr. Rajan, எலும்பு மருத்துவம்.';
+  }
+
+  if (!session.collected.name) {
+    session.lastAsked = 'name';
+    return `சரி, ${session.collected.doctor} appointment. உங்கள் பெயர் என்ன?`;
+  }
+
+  if (!session.collected.mobile) {
+    session.lastAsked = 'mobile';
+    return 'நன்றி. உங்கள் mobile number சொல்லுங்கள்.';
+  }
+
+  session.lastAsked = null;
+  return `நன்றி ${session.collected.name}. ${session.collected.doctor} அவர்களிடம் உங்கள் appointment பதிவு செய்யப்பட்டது. உங்கள் mobile number ${session.collected.mobile}.`;
+}
+
+function applyDeterministicBooking(session, transcript) {
+  const doctor = extractDoctor(transcript);
+  if (doctor) {
+    session.collected.doctor = doctor.name;
+    console.log('Doctor selected:', doctor.name, 'department:', doctor.department);
+  }
+
+  const mobile = extractMobile(transcript);
+  if (mobile) {
+    session.collected.mobile = mobile;
+    console.log('Mobile captured:', mobile);
+  }
+
+  const possibleName = maybeExtractNameFromAnswer(session, transcript);
+  if (possibleName) {
+    session.collected.name = possibleName;
+    console.log('Name captured:', possibleName);
+  }
+
+  if (doctor || mobile || possibleName) {
+    const reply = nextBookingQuestion(session);
+    return {
+      handled: true,
+      reply,
+      complete: Boolean(session.collected.name && session.collected.mobile && session.collected.doctor)
+    };
+  }
+
+  return { handled: false };
+}
+
 function buildSystemPrompt(session) {
   return `நீங்கள் ஸ்ரீ லட்சுமி மருத்துவமனையின் (Sri Lakshmi Hospital) AI வரவேற்பு உதவியாளர்.
 
-கிடைக்கும் டாக்டர்கள்: "Dr. Kumar" (Cardiology), "Dr. Priya" (General Medicine), "Dr. Rajan" (Orthopedic).
+கிடைக்கும் டாக்டர்கள்: "Dr. Kumar" - இதய மருத்துவம், "Dr. Priya" - பொது மருத்துவம், "Dr. Rajan" - எலும்பு மருத்துவம். Department பெயரை doctor பெயருடன் சேர்த்து முழு பெயர் போல சொல்ல வேண்டாம்.
 OPD நேரம்: காலை 8-1 மணி, மாலை 4-8 மணி. ஞாயிறு விடுமுறை. Consultation fee ரூபாய் 300.
 
 உங்கள் வேலை appointment booking மட்டும். நோயாளியிடம் பெயர், மொபைல் நம்பர், எந்த டாக்டரிடம் appointment வேண்டும் என்பதை மட்டும் கேட்டு சேகரிக்கவும். ஒரு நேரத்தில் ஒரே ஒரு கேள்வி மட்டும் கேளுங்கள்.
@@ -228,7 +319,8 @@ function setupMediaStream(server) {
 
     const session = {
       collected: { name: null, mobile: null, doctor: null },
-      conversationHistory: []
+      conversationHistory: [],
+      lastAsked: null
     };
 
     function resetCallerAudio() {
@@ -273,6 +365,19 @@ function setupMediaStream(server) {
         }
 
         console.log('Transcript:', cleanedTranscript);
+
+        if (userIsAskingForDoctorList(cleanedTranscript)) {
+          await sendTTSResponse(ws, DOCTOR_LIST_REPLY, streamSid, startBotSpeakingWindow);
+          session.lastAsked = 'doctor';
+          return;
+        }
+
+        const bookingUpdate = applyDeterministicBooking(session, cleanedTranscript);
+        if (bookingUpdate.handled) {
+          await sendTTSResponse(ws, bookingUpdate.reply, streamSid, startBotSpeakingWindow);
+          if (bookingUpdate.complete) console.log('Booking complete:', session.collected);
+          return;
+        }
 
         const faqAnswer = checkFAQ(cleanedTranscript);
         if (faqAnswer) {
@@ -325,7 +430,8 @@ function setupMediaStream(server) {
       if (data.event === 'start') {
         streamSid = data.start.streamSid;
         console.log('Call started, streamSid:', streamSid);
-        await sendTTSResponse(ws, 'வணக்கம்! இது ஸ்ரீ லட்சுமி மருத்துவமனை. நான் உங்களுக்கு எப்படி உதவ முடியும்?', streamSid, startBotSpeakingWindow);
+        session.lastAsked = 'doctor';
+        await sendTTSResponse(ws, 'வணக்கம்! இது ஸ்ரீ லட்சுமி மருத்துவமனை. Appointment பதிவு செய்ய எந்த டாக்டரிடம் பார்க்க வேண்டும்?', streamSid, startBotSpeakingWindow);
         return;
       }
 
@@ -444,3 +550,4 @@ async function sendTTSResponse(ws, text, streamSid, beforeSend) {
 }
 
 module.exports = { router, setupMediaStream };
+
