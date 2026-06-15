@@ -15,6 +15,7 @@ const MIN_SPEECH_FRAMES_FOR_STT = 18; // About 360 ms of actual voice.
 const LANGUAGE_MIN_SPEECH_FRAMES_FOR_STT = 6; // "Tamil" or "English" may be brief.
 const MOBILE_SILENCE_FRAMES_TO_END_UTTERANCE = 40; // About 800 ms between spoken digits.
 const MOBILE_MIN_SPEECH_FRAMES_FOR_STT = 4; // Short spoken digits must still reach STT.
+const POST_BOOKING_MIN_SPEECH_FRAMES_FOR_STT = 4; // Short questions such as "fees?" must reach STT.
 
 const DOCTORS = [
   { name: 'Dr. Kumar', spokenName: 'டாக்டர் குமார்', department: 'Cardiology', spokenDepartment: 'இதய மருத்துவர்', aliases: ['kumar', 'குமார்', 'குமாரு', 'cardiology', 'கார்டியாலஜி', 'heart', 'இதயம்'] },
@@ -303,10 +304,13 @@ function isThanksOrGoodbye(text) {
 
 function hasNoMoreQueries(text) {
   const lower = text.toLowerCase().replace(/[.,!?]/g, ' ').replace(/\s+/g, ' ').trim();
-  return isThanksOrGoodbye(lower) || [
+  const closingPhrases = [
     'no', 'no queries', 'no query', 'nothing', 'nothing else', 'thats all', "that's all",
-    'no thank you', 'no thanks', 'வேண்டாம்', 'வேறு எதுவும் இல்லை', 'ஒன்றும் இல்லை', 'அவ்வளவுதான்'
-  ].some((phrase) => lower === phrase || lower.includes(phrase));
+    'no thank you', 'no thanks', 'thank you', 'thanks', 'okay thank you', 'ok thank you',
+    'bye', 'goodbye', 'வேண்டாம்', 'வேறு எதுவும் இல்லை', 'ஒன்றும் இல்லை', 'அவ்வளவுதான்',
+    'நன்றி', 'சரி நன்றி'
+  ];
+  return closingPhrases.includes(lower);
 }
 
 function isTokenNumberQuestion(text) {
@@ -316,8 +320,8 @@ function isTokenNumberQuestion(text) {
 
 function getPostBookingQuestion(language) {
   return language === 'en-IN'
-    ? 'Do you have any other questions? You can also ask for your token number.'
-    : 'வேறு ஏதேனும் கேள்விகள் உள்ளனவா? உங்கள் வரிசை எண்ணையும் கேட்கலாம்.';
+    ? 'Do you have any other questions?'
+    : 'வேறு ஏதேனும் கேள்விகள் உள்ளனவா?';
 }
 
 function getTokenReply(session) {
@@ -753,7 +757,7 @@ function setupMediaStream(server, io) {
       session.lastAsked = 'post_booking';
       await sendTTSResponse(
         ws,
-        `${replyText} ${getPostBookingQuestion(session.language)}`,
+        `${replyText} ${getTokenReply(session)} ${getPostBookingQuestion(session.language)}`,
         streamSid,
         startBotSpeakingWindow,
         session.language
@@ -772,6 +776,7 @@ function setupMediaStream(server, io) {
       let minimumSpeechFrames = MIN_SPEECH_FRAMES_FOR_STT;
       if (session.lastAsked === 'language') minimumSpeechFrames = LANGUAGE_MIN_SPEECH_FRAMES_FOR_STT;
       if (session.lastAsked === 'mobile') minimumSpeechFrames = MOBILE_MIN_SPEECH_FRAMES_FOR_STT;
+      if (session.lastAsked === 'post_booking') minimumSpeechFrames = POST_BOOKING_MIN_SPEECH_FRAMES_FOR_STT;
 
       if (speechFrameCount < minimumSpeechFrames) {
         console.log('Dropping caller audio because not enough speech was detected:', {
@@ -824,19 +829,6 @@ function setupMediaStream(server, io) {
         }
 
         if (session.bookingComplete) {
-          if (hasNoMoreQueries(cleanedTranscript)) {
-            session.completed = true;
-            endCallAfterPlayback();
-            await sendTTSResponse(
-              ws,
-              getCallClosingReply(session.language),
-              streamSid,
-              startBotSpeakingWindow,
-              session.language
-            );
-            return;
-          }
-
           if (isTokenNumberQuestion(cleanedTranscript)) {
             await sendTTSResponse(
               ws,
@@ -860,9 +852,24 @@ function setupMediaStream(server, io) {
             return;
           }
 
+          if (hasNoMoreQueries(cleanedTranscript)) {
+            session.completed = true;
+            endCallAfterPlayback();
+            await sendTTSResponse(
+              ws,
+              getCallClosingReply(session.language),
+              streamSid,
+              startBotSpeakingWindow,
+              session.language
+            );
+            return;
+          }
+
           await sendTTSResponse(
             ws,
-            getPostBookingQuestion(session.language),
+            session.language === 'en-IN'
+              ? `Sorry, I did not understand the question. Please ask again. ${getPostBookingQuestion(session.language)}`
+              : `மன்னிக்கவும், கேள்வி புரியவில்லை. மீண்டும் கேளுங்கள். ${getPostBookingQuestion(session.language)}`,
             streamSid,
             startBotSpeakingWindow,
             session.language
@@ -1065,9 +1072,9 @@ async function synthesizeTTS(text, targetLanguageCode) {
   const response = await axios.post('https://api.sarvam.ai/text-to-speech', {
     text,
     target_language_code: targetLanguageCode,
-    speaker: 'neha',
+    speaker: 'ritu',
     model: 'bulbul:v3',
-    pace: 1.05,
+    pace: 1.15,
     temperature: 0.4,
     speech_sample_rate: String(TWILIO_SAMPLE_RATE),
     output_audio_codec: 'mulaw'
