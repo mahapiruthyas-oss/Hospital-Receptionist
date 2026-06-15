@@ -8,8 +8,9 @@ const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
 const TWILIO_SAMPLE_RATE = 8000;
 const SARVAM_STT_SAMPLE_RATE = 16000;
 const TWILIO_FRAME_MS = 20;
-const FRAMES_PER_STT_CHUNK = 150; // About 3 seconds of caller audio.
-const MIN_FRAMES_FOR_STT = 45; // About 900 ms; skips tiny noises.
+const SPEECH_RMS_THRESHOLD = 450;
+const SILENCE_FRAMES_TO_END_UTTERANCE = 35; // About 700 ms.
+const MIN_SPEECH_FRAMES_FOR_STT = 18; // About 360 ms of actual voice.
 
 function getSarvamHeaders() {
   return { 'api-subscription-key': SARVAM_API_KEY };
@@ -103,11 +104,6 @@ async function transcribeAudio(mulawBuffer) {
     rms: Math.round(rms)
   });
 
-  if (rms < 120) {
-    console.log('Skipping STT chunk because it looks like silence. RMS:', Math.round(rms));
-    return '';
-  }
-
   const pcm16k = upsamplePcm16LeBy2(pcm8k);
   const wavBuffer = pcm16LeToWav(pcm16k, SARVAM_STT_SAMPLE_RATE);
 
@@ -126,6 +122,12 @@ async function transcribeAudio(mulawBuffer) {
       ...formData.getHeaders()
     },
     maxBodyLength: Infinity
+  });
+
+  console.log('Sarvam STT response:', {
+    transcript: res.data.transcript || '',
+    language_code: res.data.language_code || null,
+    language_probability: res.data.language_probability ?? null
   });
 
   return res.data.transcript || '';
@@ -173,12 +175,14 @@ async function getAssistantReply(session, transcript) {
   session.conversationHistory.push({ role: 'user', content: transcript });
 
   const llmRes = await axios.post('https://api.sarvam.ai/v1/chat/completions', {
-    model: 'sarvam-m',
+    model: 'sarvam-30b',
     messages: [
       { role: 'system', content: buildSystemPrompt(session) },
       ...session.conversationHistory
     ],
-    max_tokens: 300
+    max_tokens: 300,
+    temperature: 0.2,
+    response_format: { type: 'json_object' }
   }, {
     headers: {
       ...getSarvamHeaders(),
@@ -217,21 +221,44 @@ function setupMediaStream(server) {
     let inboundFrameCount = 0;
     let skippedOpeningFrames = 0;
     let isBotSpeaking = false;
+    let botSpeakingFallbackTimer = null;
+    let silenceFrameCount = 0;
+    let speechFrameCount = 0;
+    let heardSpeech = false;
 
     const session = {
       collected: { name: null, mobile: null, doctor: null },
       conversationHistory: []
     };
 
+    function resetCallerAudio() {
+      audioChunks = [];
+      silenceFrameCount = 0;
+      speechFrameCount = 0;
+      heardSpeech = false;
+    }
+
     async function processCallerAudio(reason) {
-      if (isProcessing || audioChunks.length < MIN_FRAMES_FOR_STT) return;
+      if (isProcessing || audioChunks.length === 0) return;
+
+      if (speechFrameCount < MIN_SPEECH_FRAMES_FOR_STT) {
+        console.log('Dropping caller audio because not enough speech was detected:', {
+          reason,
+          frames: audioChunks.length,
+          speechFrames: speechFrameCount
+        });
+        resetCallerAudio();
+        return;
+      }
 
       isProcessing = true;
       const chunksToProcess = audioChunks;
-      audioChunks = [];
+      const speechFramesToProcess = speechFrameCount;
+      resetCallerAudio();
 
-      console.log(`Processing caller audio because ${reason}:`, {
+      console.log(`Processing caller speech because ${reason}:`, {
         frames: chunksToProcess.length,
+        speechFrames: speechFramesToProcess,
         approxSeconds: Number(((chunksToProcess.length * TWILIO_FRAME_MS) / 1000).toFixed(2))
       });
 
@@ -241,7 +268,7 @@ function setupMediaStream(server) {
         const cleanedTranscript = transcript.trim();
 
         if (!cleanedTranscript) {
-          console.log('Sarvam STT returned empty transcript.');
+          console.log('Sarvam STT returned empty transcript. This usually means silence/noise reached STT, not clear speech.');
           return;
         }
 
@@ -249,9 +276,7 @@ function setupMediaStream(server) {
 
         const faqAnswer = checkFAQ(cleanedTranscript);
         if (faqAnswer) {
-          await sendTTSResponse(ws, faqAnswer, streamSid, () => {
-            isBotSpeaking = true;
-          });
+          await sendTTSResponse(ws, faqAnswer, streamSid, startBotSpeakingWindow);
           return;
         }
 
@@ -265,9 +290,7 @@ function setupMediaStream(server) {
         session.conversationHistory.push({ role: 'assistant', content: parsed.reply || '' });
         session.conversationHistory = session.conversationHistory.slice(-10);
 
-        await sendTTSResponse(ws, parsed.reply || 'மன்னிக்கவும், மீண்டும் சொல்லுங்கள்.', streamSid, () => {
-          isBotSpeaking = true;
-        });
+        await sendTTSResponse(ws, parsed.reply || 'மன்னிக்கவும், மீண்டும் சொல்லுங்கள்.', streamSid, startBotSpeakingWindow);
 
         if (parsed.complete) {
           console.log('Booking complete:', session.collected);
@@ -277,6 +300,17 @@ function setupMediaStream(server) {
       } finally {
         isProcessing = false;
       }
+    }
+
+    function startBotSpeakingWindow(durationMs) {
+      isBotSpeaking = true;
+      clearTimeout(botSpeakingFallbackTimer);
+      botSpeakingFallbackTimer = setTimeout(() => {
+        if (isBotSpeaking) {
+          console.log('Bot speaking fallback ended; listening for caller now.');
+          isBotSpeaking = false;
+        }
+      }, Math.max(1200, durationMs + 700));
     }
 
     ws.on('message', async (message) => {
@@ -291,26 +325,26 @@ function setupMediaStream(server) {
       if (data.event === 'start') {
         streamSid = data.start.streamSid;
         console.log('Call started, streamSid:', streamSid);
-        await sendTTSResponse(ws, 'வணக்கம்! இது ஸ்ரீ லட்சுமி மருத்துவமனை. நான் உங்களுக்கு எப்படி உதவ முடியும்?', streamSid, () => {
-          isBotSpeaking = true;
-        });
+        await sendTTSResponse(ws, 'வணக்கம்! இது ஸ்ரீ லட்சுமி மருத்துவமனை. நான் உங்களுக்கு எப்படி உதவ முடியும்?', streamSid, startBotSpeakingWindow);
         return;
       }
 
       if (data.event === 'mark') {
         console.log('Twilio finished playing:', data.mark?.name);
+        clearTimeout(botSpeakingFallbackTimer);
         isBotSpeaking = false;
         return;
       }
 
       if (data.event === 'media') {
         inboundFrameCount += 1;
+        const frame = Buffer.from(data.media.payload, 'base64');
 
         if (inboundFrameCount === 1 || inboundFrameCount % 100 === 0) {
           console.log('Receiving caller media from Twilio:', {
             frames: inboundFrameCount,
             track: data.media.track,
-            payloadBytes: Buffer.from(data.media.payload, 'base64').length
+            payloadBytes: frame.length
           });
         }
 
@@ -323,10 +357,29 @@ function setupMediaStream(server) {
           return;
         }
 
-        audioChunks.push(Buffer.from(data.media.payload, 'base64'));
+        const frameRms = calculateRmsPcm16Le(mulawToPcm16(frame));
 
-        if (audioChunks.length >= FRAMES_PER_STT_CHUNK) {
-          await processCallerAudio('audio chunk is ready');
+        if (frameRms >= SPEECH_RMS_THRESHOLD) {
+          heardSpeech = true;
+          speechFrameCount += 1;
+          silenceFrameCount = 0;
+          audioChunks.push(frame);
+        } else if (heardSpeech) {
+          silenceFrameCount += 1;
+          audioChunks.push(frame);
+        }
+
+        if (inboundFrameCount % 100 === 0) {
+          console.log('Caller audio level:', {
+            rms: Math.round(frameRms),
+            heardSpeech,
+            speechFrames: speechFrameCount,
+            bufferedFrames: audioChunks.length
+          });
+        }
+
+        if (heardSpeech && silenceFrameCount >= SILENCE_FRAMES_TO_END_UTTERANCE) {
+          await processCallerAudio('caller paused');
         }
       }
 
@@ -338,6 +391,7 @@ function setupMediaStream(server) {
 
     ws.on('close', async () => {
       await processCallerAudio('stream closed');
+      clearTimeout(botSpeakingFallbackTimer);
       console.log('Stream disconnected');
     });
   });
@@ -373,10 +427,14 @@ async function sendTTSResponse(ws, text, streamSid, beforeSend) {
 
     if (ws.readyState === WebSocket.OPEN) {
       const markName = `tts-${Date.now()}`;
-      if (beforeSend) beforeSend();
+      const audioBytes = Buffer.from(audioBase64, 'base64').length;
+      const estimatedDurationMs = Math.ceil((audioBytes / TWILIO_SAMPLE_RATE) * 1000);
+
+      if (beforeSend) beforeSend(estimatedDurationMs);
+
       ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload: audioBase64 } }));
       ws.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: markName } }));
-      console.log('TTS audio sent, streamSid:', streamSid, 'mark:', markName);
+      console.log('TTS audio sent, streamSid:', streamSid, 'mark:', markName, 'estimatedMs:', estimatedDurationMs);
     } else {
       console.error('TTS not sent. WebSocket not open. readyState:', ws.readyState);
     }
