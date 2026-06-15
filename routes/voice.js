@@ -37,6 +37,10 @@ function setAppointmentSaver(saveFn) {
   externalAppointmentSaver = saveFn;
 }
 
+function setSocketIo(io) {
+  socketIo = io;
+}
+
 function buildAppointmentPayload(collected) {
   return {
     hospitalId: 'H001',
@@ -674,4 +678,6 @@ async function sendTTSResponse(ws, text, streamSid, beforeSend) {
 }
 
 module.exports = { router, setupMediaStream, setAppointmentSaver, setSocketIo, saveAppointment };
+
+
 
