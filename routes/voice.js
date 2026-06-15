@@ -12,6 +12,9 @@ const TWILIO_FRAME_MS = 20;
 const SPEECH_RMS_THRESHOLD = 450;
 const SILENCE_FRAMES_TO_END_UTTERANCE = 35; // About 700 ms.
 const MIN_SPEECH_FRAMES_FOR_STT = 18; // About 360 ms of actual voice.
+const LANGUAGE_MIN_SPEECH_FRAMES_FOR_STT = 6; // "Tamil" or "English" may be brief.
+const MOBILE_SILENCE_FRAMES_TO_END_UTTERANCE = 50; // Give callers more time between digits.
+const MOBILE_MIN_SPEECH_FRAMES_FOR_STT = 4; // Short spoken digits must still reach STT.
 
 const DOCTORS = [
   { name: 'Dr. Kumar', spokenName: 'டாக்டர் குமார்', department: 'Cardiology', spokenDepartment: 'இதய மருத்துவர்', aliases: ['kumar', 'குமார்', 'குமாரு', 'cardiology', 'கார்டியாலஜி', 'heart', 'இதயம்'] },
@@ -19,7 +22,8 @@ const DOCTORS = [
   { name: 'Dr. Rajan', spokenName: 'டாக்டர் ராஜன்', department: 'Orthopedic', spokenDepartment: 'எலும்பு மருத்துவர்', aliases: ['rajan', 'ராஜன்', 'ராஜா', 'orthopedic', 'ortho', 'ஆர்த்தோ', 'எலும்பு'] }
 ];
 
-const DOCTOR_LIST_REPLY = 'நம்ம கிட்ட டாக்டர் குமார் இதய மருத்துவர், டாக்டர் பிரியா பொது மருத்துவர், டாக்டர் ராஜன் எலும்பு மருத்துவர் இருக்காங்க. யார்கிட்ட appointment வேணும்?';
+const LANGUAGE_SELECTION_PROMPT_TAMIL = 'வணக்கம். இது ஸ்ரீ லட்சுமி மருத்துவமனை. நீங்கள் தமிழ் அல்லது ஆங்கிலம், எந்த மொழியில் பேச விரும்புகிறீர்கள்?';
+const LANGUAGE_SELECTION_PROMPT_ENGLISH = 'Hello. This is Sri Lakshmi Hospital. Would you prefer Tamil or English?';
 let externalAppointmentSaver = null;
 let socketIo = null;
 
@@ -184,7 +188,7 @@ function pcm16LeToWav(pcm, sampleRate) {
   return Buffer.concat([header, pcm]);
 }
 
-async function transcribeAudio(mulawBuffer) {
+async function transcribeAudio(mulawBuffer, languageCode = 'ta-IN') {
   assertSarvamKey();
 
   const pcm8k = mulawToPcm16(mulawBuffer);
@@ -205,7 +209,7 @@ async function transcribeAudio(mulawBuffer) {
     contentType: 'audio/wav'
   });
   formData.append('model', 'saaras:v3');
-  formData.append('language_code', 'ta-IN');
+  formData.append('language_code', languageCode);
   formData.append('mode', 'transcribe');
 
   const res = await axios.post('https://api.sarvam.ai/speech-to-text', formData, {
@@ -226,20 +230,44 @@ async function transcribeAudio(mulawBuffer) {
 }
 
 const FAQS = [
-  { keywords: ['நேரம்', 'time', 'timing', 'open', 'திற'], answer: 'OPD நேரம் காலை எட்டு மணி முதல் ஒரு மணி வரை. மாலை நான்கு மணி முதல் எட்டு மணி வரை.' },
-  { keywords: ['கட்டணம்', 'fee', 'fees', 'charge', 'cost', 'விலை', 'பணம்'], answer: 'Consultation fee மூனூறு ரூபாய் தான்.' },
-  { keywords: ['எங்கே', 'where', 'location', 'address', 'வழி'], answer: 'Hospital சென்னை அண்ணா நகர்ல இருக்கு. Anna Nagar Tower bus stop பக்கம்.' },
-  { keywords: ['emergency', 'urgent', 'அவசரம்'], answer: 'Emergency க்கு zero four four, one two three four five six seven eight number க்கு call பண்ணுங்க. எப்பவும் available.' },
-  { keywords: ['ஞாயிறு', 'sunday', 'holiday', 'விடுமுறை'], answer: 'Sunday OPD இல்ல. Monday முதல் Saturday வரை மட்டும்.' },
-  { keywords: ['parking', 'பார்க்கிங்'], answer: 'Hospital முன்னாடி free parking இருக்கு.' }
+  {
+    keywords: ['நேரம்', 'time', 'timing', 'open', 'திற'],
+    tamil: 'புறநோயாளிகள் பிரிவு காலை எட்டு மணி முதல் ஒரு மணி வரையும், மாலை நான்கு மணி முதல் எட்டு மணி வரையும் செயல்படும்.',
+    english: 'The outpatient department is open from 8 AM to 1 PM and from 4 PM to 8 PM.'
+  },
+  {
+    keywords: ['கட்டணம்', 'fee', 'fees', 'charge', 'cost', 'விலை', 'பணம்'],
+    tamil: 'மருத்துவர் ஆலோசனைக் கட்டணம் முந்நூறு ரூபாய்.',
+    english: 'The consultation fee is 300 rupees.'
+  },
+  {
+    keywords: ['எங்கே', 'where', 'location', 'address', 'வழி'],
+    tamil: 'மருத்துவமனை சென்னை அண்ணா நகரில், அண்ணா நகர் கோபுரப் பேருந்து நிறுத்தத்திற்கு அருகில் உள்ளது.',
+    english: 'The hospital is in Anna Nagar, Chennai, near the Anna Nagar Tower bus stop.'
+  },
+  {
+    keywords: ['emergency', 'urgent', 'அவசரம்'],
+    tamil: 'அவசர உதவிக்கு பூஜ்ஜியம் நான்கு நான்கு, ஒன்று இரண்டு மூன்று நான்கு ஐந்து ஆறு ஏழு எட்டு என்ற எண்ணை அழைக்கவும்.',
+    english: 'For emergency assistance, please call zero four four, one two three four five six seven eight.'
+  },
+  {
+    keywords: ['ஞாயிறு', 'sunday', 'holiday', 'விடுமுறை'],
+    tamil: 'ஞாயிற்றுக்கிழமை புறநோயாளிகள் பிரிவு செயல்படாது. திங்கள் முதல் சனிக்கிழமை வரை செயல்படும்.',
+    english: 'The outpatient department is closed on Sunday and open from Monday through Saturday.'
+  },
+  {
+    keywords: ['parking', 'பார்க்கிங்', 'வாகனம்'],
+    tamil: 'மருத்துவமனைக்கு முன்பாக இலவச வாகன நிறுத்துமிடம் உள்ளது.',
+    english: 'Free parking is available in front of the hospital.'
+  }
 ];
 
-function checkFAQ(text) {
+function checkFAQ(text, language) {
   const lower = text.toLowerCase();
 
   for (const faq of FAQS) {
     if (faq.keywords.some((keyword) => lower.includes(keyword.toLowerCase()))) {
-      return faq.answer;
+      return language === 'en-IN' ? faq.english : faq.tamil;
     }
   }
 
@@ -260,6 +288,32 @@ function userIsAskingForDoctorList(text) {
 function isThanksOrGoodbye(text) {
   const lower = text.toLowerCase();
   return ['thank', 'thanks', 'thank you', 'nandri', 'நன்றி', 'ok', 'okay', 'seri', 'சரி', 'bye'].some((word) => lower.includes(word));
+}
+
+function detectLanguagePreference(text) {
+  const lower = text.toLowerCase();
+  if (['english', 'ஆங்கிலம்', 'ஆங்கில', 'இங்கிலீஷ்'].some((word) => lower.includes(word))) return 'en-IN';
+  if (['tamil', 'தமிழ்', 'தமிழில்'].some((word) => lower.includes(word))) return 'ta-IN';
+  return null;
+}
+
+function getDoctorListReply(language) {
+  if (language === 'en-IN') {
+    return 'We have Dr. Kumar for Cardiology, Dr. Priya for General Medicine, and Dr. Rajan for Orthopedics. Which doctor would you like to see?';
+  }
+  return 'எங்களிடம் இதய மருத்துவர் டாக்டர் குமார், பொது மருத்துவர் டாக்டர் பிரியா, எலும்பு மருத்துவர் டாக்டர் ராஜன் உள்ளனர். எந்த மருத்துவரைச் சந்திக்க விரும்புகிறீர்கள்?';
+}
+
+function getDoctorSpokenName(doctorName, language) {
+  const doctor = DOCTORS.find((item) => item.name === doctorName);
+  if (!doctor) return doctorName;
+  return language === 'en-IN' ? doctor.name : doctor.spokenName;
+}
+
+function getRetryReply(session) {
+  return session.language === 'en-IN'
+    ? 'Sorry, please say that again.'
+    : 'மன்னிக்கவும், மீண்டும் ஒருமுறை கூறுங்கள்.';
 }
 
 function normalizeNumberWordToken(token) {
@@ -316,6 +370,96 @@ function extractMobile(text) {
   return null;
 }
 
+function extractSpokenDigits(text) {
+  const tamilDigits = { '௦': '0', '௧': '1', '௨': '2', '௩': '3', '௪': '4', '௫': '5', '௬': '6', '௭': '7', '௮': '8', '௯': '9' };
+  const normalizedText = text.replace(/[௦-௯]/g, (digit) => tamilDigits[digit] || digit);
+  const tokens = normalizedText.split(/\s+/).filter(Boolean);
+  const parsedDigits = [];
+  let repeatNext = 1;
+
+  for (const token of tokens) {
+    const cleaned = token.toLowerCase().replace(/[.,!?;:()\[\]{}"']/g, '').trim();
+    if (['double', 'டபுள்', 'இரட்டை'].includes(cleaned)) {
+      repeatNext = 2;
+      continue;
+    }
+    if (['triple', 'டிரிபுள்', 'மும்முறை'].includes(cleaned)) {
+      repeatNext = 3;
+      continue;
+    }
+
+    if (/^\+?\d+$/.test(cleaned)) {
+      const digits = cleaned.replace(/\D/g, '');
+      for (const digit of digits) parsedDigits.push(digit);
+      repeatNext = 1;
+      continue;
+    }
+
+    const digit = normalizeNumberWordToken(cleaned);
+    if (digit !== null) {
+      for (let i = 0; i < repeatNext; i += 1) parsedDigits.push(digit);
+      repeatNext = 1;
+    }
+  }
+
+  return parsedDigits.join('');
+}
+
+function handleMobileNumberInput(session, transcript) {
+  const spokenDigits = extractSpokenDigits(transcript);
+  const language = session.language;
+
+  if (!spokenDigits) {
+    return {
+      complete: false,
+      reply: language === 'en-IN'
+        ? 'I am ready only for your mobile number now. Please say all ten digits, one digit at a time.'
+        : 'இப்போது உங்கள் கைபேசி எண்ணை மட்டும் கூறுங்கள். பத்து இலக்கங்களையும் ஒவ்வொன்றாகக் கூறுங்கள்.'
+    };
+  }
+
+  if (spokenDigits.length >= 10) {
+    session.mobileDigits = spokenDigits;
+  } else {
+    session.mobileDigits += spokenDigits;
+  }
+
+  if (session.mobileDigits.length === 12 && session.mobileDigits.startsWith('91')) {
+    session.mobileDigits = session.mobileDigits.slice(2);
+  }
+
+  const validMobile = session.mobileDigits.match(/[6-9]\d{9}/)?.[0] || null;
+  if (validMobile && session.mobileDigits.length === 10) {
+    session.collected.mobile = validMobile;
+    session.mobileDigits = '';
+    console.log('Mobile captured in dedicated number mode:', validMobile);
+    const reply = nextBookingQuestion(session);
+    return {
+      complete: Boolean(session.collected.name && session.collected.mobile && session.collected.doctor),
+      reply
+    };
+  }
+
+  if (session.mobileDigits.length > 10) {
+    console.log('Rejecting invalid mobile digit sequence:', session.mobileDigits);
+    session.mobileDigits = '';
+    return {
+      complete: false,
+      reply: language === 'en-IN'
+        ? 'That was not a valid ten-digit mobile number. Please say the ten digits again from the beginning.'
+        : 'அது சரியான பத்து இலக்கக் கைபேசி எண் அல்ல. தொடக்கத்திலிருந்து பத்து இலக்கங்களையும் மீண்டும் கூறுங்கள்.'
+    };
+  }
+
+  const remaining = 10 - session.mobileDigits.length;
+  return {
+    complete: false,
+    reply: language === 'en-IN'
+      ? `I received ${session.mobileDigits.length} digits. Please say the remaining ${remaining} digits.`
+      : `${session.mobileDigits.length} இலக்கங்கள் பதிவாகியுள்ளன. மீதமுள்ள ${remaining} இலக்கங்களைக் கூறுங்கள்.`
+  };
+}
+
 function maybeExtractNameFromAnswer(session, text) {
   if (session.lastAsked !== 'name' || session.collected.name) return null;
 
@@ -333,23 +477,35 @@ function maybeExtractNameFromAnswer(session, text) {
 }
 
 function nextBookingQuestion(session) {
+  const english = session.language === 'en-IN';
+  const doctorName = getDoctorSpokenName(session.collected.doctor, session.language);
+
   if (!session.collected.doctor) {
     session.lastAsked = 'doctor';
-    return 'Appointment க்கு எந்த doctor வேணும்? டாக்டர் குமார் இதய மருத்துவர், டாக்டர் பிரியா பொது மருத்துவர், டாக்டர் ராஜன் எலும்பு மருத்துவர்.';
+    return english
+      ? 'Which doctor would you like to book an appointment with? We have Dr. Kumar, Dr. Priya, and Dr. Rajan.'
+      : 'எந்த மருத்துவரைச் சந்திக்க விரும்புகிறீர்கள்? டாக்டர் குமார், டாக்டர் பிரியா, டாக்டர் ராஜன் ஆகியோர் உள்ளனர்.';
   }
 
   if (!session.collected.name) {
     session.lastAsked = 'name';
-    return `${session.collected.doctor} appointment சரி. உங்க பேர் என்ன?`;
+    return english
+      ? `Your appointment with ${doctorName} is selected. What is your name?`
+      : `${doctorName} அவர்களைச் சந்திக்கத் தேர்வு செய்துள்ளீர்கள். உங்கள் பெயர் என்ன?`;
   }
 
   if (!session.collected.mobile) {
     session.lastAsked = 'mobile';
-    return 'சரி. உங்க mobile number ஒவ்வொரு digit ஆ சொல்லுங்க.';
+    session.mobileDigits = '';
+    return english
+      ? 'Please say your ten-digit mobile number, one digit at a time. I will listen only for the number now.'
+      : 'உங்கள் பத்து இலக்கக் கைபேசி எண்ணை ஒவ்வொரு இலக்கமாகக் கூறுங்கள். இப்போது எண்ணை மட்டும் கேட்கிறேன்.';
   }
 
   session.lastAsked = null;
-  return `Thank you ${session.collected.name}. ${session.collected.doctor} கிட்ட உங்க appointment book ஆயிடுச்சு. இந்த number க்கு call பண்ணுவோம்: ${session.collected.mobile}.`;
+  return english
+    ? `Thank you, ${session.collected.name}. Your appointment with ${doctorName} has been booked. Your registered mobile number is ${session.collected.mobile}.`
+    : `நன்றி, ${session.collected.name}. ${doctorName} அவர்களுடனான சந்திப்பு பதிவு செய்யப்பட்டுள்ளது. பதிவு செய்யப்பட்ட கைபேசி எண் ${session.collected.mobile}.`;
 }
 
 function applyDeterministicBooking(session, transcript) {
@@ -384,17 +540,23 @@ function applyDeterministicBooking(session, transcript) {
 }
 
 function buildSystemPrompt(session) {
-  return `You are Sri Lakshmi Hospital receptionist. Speak in natural friendly spoken Tamil used in Chennai. Use Tamil script. Do not use romanized Tanglish like 'venum', 'sollunga', 'book panna'. Common English words like appointment, doctor, mobile are okay. Keep it short, not literary Tamil.
+  const languageInstruction = session.language === 'en-IN'
+    ? 'Speak only in clear, polite English. Do not use Tamil or Tanglish.'
+    : 'Speak only in clear, polite Tamil using Tamil script. Do not use English or Tanglish. Use standard, easily understood Tamil rather than colloquial Tamil.';
 
-Available doctors: டாக்டர் குமார் - இதய மருத்துவர். டாக்டர் பிரியா - பொது மருத்துவர். டாக்டர் ராஜன் - எலும்பு மருத்துவர். Do not read department as part of the doctor name.
+  return `You are Sri Lakshmi Hospital receptionist. ${languageInstruction}
+
+Available doctors: Dr. Kumar - Cardiology. Dr. Priya - General Medicine. Dr. Rajan - Orthopedics.
 OPD timing: காலை 8 to 1, மாலை 4 to 8. Sunday closed. Consultation fee 300 rupees.
 
 Your main job is appointment booking. Collect only doctor, patient name, and mobile number. Ask one question at a time.
+Never try to extract or discuss anything except digits while the requested field is mobile.
 
 Collected so far: ${JSON.stringify(session.collected)}
+Requested field: ${session.lastAsked || 'none'}
 
 Return strict JSON only:
-{"extracted":{"name":null or "string","mobile":null or "string","doctor":null or "Dr. Kumar" or "Dr. Priya" or "Dr. Rajan"},"reply":"short natural spoken Tamil reply in Tamil script, with only common English words","complete":true or false}`;
+{"extracted":{"name":null or "string","mobile":null or "string","doctor":null or "Dr. Kumar" or "Dr. Priya" or "Dr. Rajan"},"reply":"short reply in the selected language only","complete":true or false}`;
 }
 
 async function getAssistantReply(session, transcript) {
@@ -425,7 +587,7 @@ async function getAssistantReply(session, transcript) {
     console.error('LLM JSON parse failed, raw was:', raw);
     return {
       extracted: {},
-      reply: 'Sorry, இன்னொரு தடவை சொல்லுங்க.',
+      reply: getRetryReply(session),
       complete: false
     };
   }
@@ -459,7 +621,9 @@ function setupMediaStream(server, io) {
       lastAsked: null,
       completed: false,
       closeAfterPlayback: false,
-      saved: false
+      saved: false,
+      language: null,
+      mobileDigits: ''
     };
 
     function resetCallerAudio() {
@@ -480,7 +644,10 @@ function setupMediaStream(server, io) {
 
       session.completed = true;
       endCallAfterPlayback();
-      await sendTTSResponse(ws, `${replyText} Call ah close panren. Thank you.`, streamSid, startBotSpeakingWindow);
+      const closingText = session.language === 'en-IN'
+        ? `${replyText} Thank you. I will end the call now.`
+        : `${replyText} நன்றி. இப்போது அழைப்பை நிறைவு செய்கிறேன்.`;
+      await sendTTSResponse(ws, closingText, streamSid, startBotSpeakingWindow, session.language);
       console.log('Booking complete:', session.collected, 'saved:', session.saved);
     }
 
@@ -492,7 +659,11 @@ function setupMediaStream(server, io) {
 
       if (isProcessing || audioChunks.length === 0) return;
 
-      if (speechFrameCount < MIN_SPEECH_FRAMES_FOR_STT) {
+      let minimumSpeechFrames = MIN_SPEECH_FRAMES_FOR_STT;
+      if (session.lastAsked === 'language') minimumSpeechFrames = LANGUAGE_MIN_SPEECH_FRAMES_FOR_STT;
+      if (session.lastAsked === 'mobile') minimumSpeechFrames = MOBILE_MIN_SPEECH_FRAMES_FOR_STT;
+
+      if (speechFrameCount < minimumSpeechFrames) {
         console.log('Dropping caller audio because not enough speech was detected:', {
           reason,
           frames: audioChunks.length,
@@ -515,7 +686,7 @@ function setupMediaStream(server, io) {
 
       try {
         const mulawBuffer = Buffer.concat(chunksToProcess);
-        const transcript = await transcribeAudio(mulawBuffer);
+        const transcript = await transcribeAudio(mulawBuffer, session.language || 'ta-IN');
         const cleanedTranscript = transcript.trim();
 
         if (!cleanedTranscript) {
@@ -525,13 +696,40 @@ function setupMediaStream(server, io) {
 
         console.log('Transcript:', cleanedTranscript);
 
+        if (!session.language) {
+          const selectedLanguage = detectLanguagePreference(cleanedTranscript);
+          if (!selectedLanguage) {
+            await sendBilingualTTSResponse(ws, LANGUAGE_SELECTION_PROMPT_TAMIL, LANGUAGE_SELECTION_PROMPT_ENGLISH, streamSid, startBotSpeakingWindow);
+            return;
+          }
+
+          session.language = selectedLanguage;
+          session.lastAsked = 'doctor';
+          session.conversationHistory = [];
+          const welcome = selectedLanguage === 'en-IN'
+            ? 'Thank you. We can continue in English. Which doctor would you like to book an appointment with?'
+            : 'நன்றி. தமிழில் தொடரலாம். எந்த மருத்துவரைச் சந்திக்க விரும்புகிறீர்கள்?';
+          await sendTTSResponse(ws, welcome, streamSid, startBotSpeakingWindow, selectedLanguage);
+          return;
+        }
+
         if (session.completed && isThanksOrGoodbye(cleanedTranscript)) {
           endCallAfterPlayback();
           return;
         }
 
+        if (session.lastAsked === 'mobile' && !session.collected.mobile) {
+          const mobileUpdate = handleMobileNumberInput(session, cleanedTranscript);
+          if (mobileUpdate.complete) {
+            await completeBookingAndReply(mobileUpdate.reply);
+          } else {
+            await sendTTSResponse(ws, mobileUpdate.reply, streamSid, startBotSpeakingWindow, session.language);
+          }
+          return;
+        }
+
         if (userIsAskingForDoctorList(cleanedTranscript)) {
-          await sendTTSResponse(ws, DOCTOR_LIST_REPLY, streamSid, startBotSpeakingWindow);
+          await sendTTSResponse(ws, getDoctorListReply(session.language), streamSid, startBotSpeakingWindow, session.language);
           session.lastAsked = 'doctor';
           return;
         }
@@ -541,14 +739,14 @@ function setupMediaStream(server, io) {
           if (bookingUpdate.complete) {
             await completeBookingAndReply(bookingUpdate.reply);
           } else {
-            await sendTTSResponse(ws, bookingUpdate.reply, streamSid, startBotSpeakingWindow);
+            await sendTTSResponse(ws, bookingUpdate.reply, streamSid, startBotSpeakingWindow, session.language);
           }
           return;
         }
 
-        const faqAnswer = checkFAQ(cleanedTranscript);
+        const faqAnswer = checkFAQ(cleanedTranscript, session.language);
         if (faqAnswer) {
-          await sendTTSResponse(ws, faqAnswer, streamSid, startBotSpeakingWindow);
+          await sendTTSResponse(ws, faqAnswer, streamSid, startBotSpeakingWindow, session.language);
           return;
         }
 
@@ -565,7 +763,7 @@ function setupMediaStream(server, io) {
         if (parsed.complete && session.collected.name && session.collected.mobile && session.collected.doctor) {
           await completeBookingAndReply(parsed.reply || nextBookingQuestion(session));
         } else {
-          await sendTTSResponse(ws, parsed.reply || 'Sorry, இன்னொரு தடவை சொல்லுங்க.', streamSid, startBotSpeakingWindow);
+          await sendTTSResponse(ws, parsed.reply || getRetryReply(session), streamSid, startBotSpeakingWindow, session.language);
         }
       } catch (err) {
         console.error('Processing error:', err.response?.data || err.message);
@@ -601,8 +799,8 @@ function setupMediaStream(server, io) {
       if (data.event === 'start') {
         streamSid = data.start.streamSid;
         console.log('Call started, streamSid:', streamSid);
-        session.lastAsked = 'doctor';
-        await sendTTSResponse(ws, 'வணக்கம், Sri Lakshmi Hospital. Appointment க்கு எந்த doctor வேணும்?', streamSid, startBotSpeakingWindow);
+        session.lastAsked = 'language';
+        await sendBilingualTTSResponse(ws, LANGUAGE_SELECTION_PROMPT_TAMIL, LANGUAGE_SELECTION_PROMPT_ENGLISH, streamSid, startBotSpeakingWindow);
         return;
       }
 
@@ -660,7 +858,11 @@ function setupMediaStream(server, io) {
           });
         }
 
-        if (heardSpeech && silenceFrameCount >= SILENCE_FRAMES_TO_END_UTTERANCE) {
+        const silenceFramesNeeded = session.lastAsked === 'mobile'
+          ? MOBILE_SILENCE_FRAMES_TO_END_UTTERANCE
+          : SILENCE_FRAMES_TO_END_UTTERANCE;
+
+        if (heardSpeech && silenceFrameCount >= silenceFramesNeeded) {
           await processCallerAudio('caller paused');
         }
       }
@@ -681,45 +883,77 @@ function setupMediaStream(server, io) {
   return wss;
 }
 
-async function sendTTSResponse(ws, text, streamSid, beforeSend) {
+async function synthesizeTTS(text, targetLanguageCode) {
+  assertSarvamKey();
+  const response = await axios.post('https://api.sarvam.ai/text-to-speech', {
+    text,
+    target_language_code: targetLanguageCode,
+    speaker: 'anushka',
+    model: 'bulbul:v2',
+    speech_sample_rate: String(TWILIO_SAMPLE_RATE),
+    output_audio_codec: 'mulaw',
+    enable_preprocessing: true
+  }, {
+    headers: {
+      ...getSarvamHeaders(),
+      'Content-Type': 'application/json'
+    }
+  });
+
+  return response.data.audios?.[0] || null;
+}
+
+function sendAudioToTwilio(ws, audioBase64, streamSid, beforeSend) {
+  if (ws.readyState !== WebSocket.OPEN) {
+    console.error('TTS not sent. WebSocket not open. readyState:', ws.readyState);
+    return;
+  }
+
+  const markName = `tts-${Date.now()}`;
+  const audioBytes = Buffer.from(audioBase64, 'base64').length;
+  const estimatedDurationMs = Math.ceil((audioBytes / TWILIO_SAMPLE_RATE) * 1000);
+
+  if (beforeSend) beforeSend(estimatedDurationMs);
+
+  ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload: audioBase64 } }));
+  ws.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: markName } }));
+  console.log('TTS audio sent, streamSid:', streamSid, 'mark:', markName, 'estimatedMs:', estimatedDurationMs);
+}
+
+async function sendBilingualTTSResponse(ws, tamilText, englishText, streamSid, beforeSend) {
+  try {
+    console.log('Bilingual TTS Text:', `${tamilText} ${englishText}`.substring(0, 160));
+    const tamilAudio = await synthesizeTTS(tamilText, 'ta-IN');
+    const englishAudio = await synthesizeTTS(englishText, 'en-IN');
+
+    if (!tamilAudio || !englishAudio) {
+      console.error('Bilingual TTS returned no audio.');
+      return;
+    }
+
+    const combinedAudio = Buffer.concat([
+      Buffer.from(tamilAudio, 'base64'),
+      Buffer.from(englishAudio, 'base64')
+    ]).toString('base64');
+
+    sendAudioToTwilio(ws, combinedAudio, streamSid, beforeSend);
+  } catch (err) {
+    console.error('Bilingual TTS API Error:', err.response?.data || err.message);
+  }
+}
+
+async function sendTTSResponse(ws, text, streamSid, beforeSend, targetLanguageCode = 'ta-IN') {
   try {
     assertSarvamKey();
     console.log('TTS Text:', text.substring(0, 120));
 
-    const response = await axios.post('https://api.sarvam.ai/text-to-speech', {
-      text,
-      target_language_code: 'ta-IN',
-      speaker: 'anushka',
-      model: 'bulbul:v2',
-      speech_sample_rate: String(TWILIO_SAMPLE_RATE),
-      output_audio_codec: 'mulaw',
-      enable_preprocessing: true
-    }, {
-      headers: {
-        ...getSarvamHeaders(),
-        'Content-Type': 'application/json'
-      }
-    });
-
-    const audioBase64 = response.data.audios?.[0];
+    const audioBase64 = await synthesizeTTS(text, targetLanguageCode);
     if (!audioBase64) {
-      console.error('TTS returned no audio. Full response:', JSON.stringify(response.data));
+      console.error('TTS returned no audio.');
       return;
     }
 
-    if (ws.readyState === WebSocket.OPEN) {
-      const markName = `tts-${Date.now()}`;
-      const audioBytes = Buffer.from(audioBase64, 'base64').length;
-      const estimatedDurationMs = Math.ceil((audioBytes / TWILIO_SAMPLE_RATE) * 1000);
-
-      if (beforeSend) beforeSend(estimatedDurationMs);
-
-      ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload: audioBase64 } }));
-      ws.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: markName } }));
-      console.log('TTS audio sent, streamSid:', streamSid, 'mark:', markName, 'estimatedMs:', estimatedDurationMs);
-    } else {
-      console.error('TTS not sent. WebSocket not open. readyState:', ws.readyState);
-    }
+    sendAudioToTwilio(ws, audioBase64, streamSid, beforeSend);
   } catch (err) {
     console.error('TTS API Error:', err.response?.data || err.message);
   }
