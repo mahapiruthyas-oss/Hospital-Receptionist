@@ -7,6 +7,9 @@ const FormData = require('form-data');
 const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
 const TWILIO_SAMPLE_RATE = 8000;
 const SARVAM_STT_SAMPLE_RATE = 16000;
+const TWILIO_FRAME_MS = 20;
+const FRAMES_PER_STT_CHUNK = 150; // About 3 seconds of caller audio.
+const MIN_FRAMES_FOR_STT = 45; // About 900 ms; skips tiny noises.
 
 function getSarvamHeaders() {
   return { 'api-subscription-key': SARVAM_API_KEY };
@@ -34,6 +37,20 @@ function mulawToPcm16(buffer) {
   }
 
   return pcm;
+}
+
+function calculateRmsPcm16Le(pcm) {
+  if (!pcm.length) return 0;
+
+  let sumSquares = 0;
+  const samples = pcm.length / 2;
+
+  for (let i = 0; i < pcm.length; i += 2) {
+    const sample = pcm.readInt16LE(i);
+    sumSquares += sample * sample;
+  }
+
+  return Math.sqrt(sumSquares / samples);
 }
 
 function upsamplePcm16LeBy2(pcm8k) {
@@ -78,6 +95,19 @@ async function transcribeAudio(mulawBuffer) {
   assertSarvamKey();
 
   const pcm8k = mulawToPcm16(mulawBuffer);
+  const rms = calculateRmsPcm16Le(pcm8k);
+
+  console.log('Sending caller audio to Sarvam STT:', {
+    bytes: mulawBuffer.length,
+    seconds: Number((mulawBuffer.length / TWILIO_SAMPLE_RATE).toFixed(2)),
+    rms: Math.round(rms)
+  });
+
+  if (rms < 120) {
+    console.log('Skipping STT chunk because it looks like silence. RMS:', Math.round(rms));
+    return '';
+  }
+
   const pcm16k = upsamplePcm16LeBy2(pcm8k);
   const wavBuffer = pcm16LeToWav(pcm16k, SARVAM_STT_SAMPLE_RATE);
 
@@ -182,15 +212,72 @@ function setupMediaStream(server) {
 
   wss.on('connection', (ws) => {
     let audioChunks = [];
-    let silenceTimer = null;
     let isProcessing = false;
-    let framesReceived = 0;
     let streamSid = null;
+    let inboundFrameCount = 0;
+    let skippedOpeningFrames = 0;
+    let isBotSpeaking = false;
 
     const session = {
       collected: { name: null, mobile: null, doctor: null },
       conversationHistory: []
     };
+
+    async function processCallerAudio(reason) {
+      if (isProcessing || audioChunks.length < MIN_FRAMES_FOR_STT) return;
+
+      isProcessing = true;
+      const chunksToProcess = audioChunks;
+      audioChunks = [];
+
+      console.log(`Processing caller audio because ${reason}:`, {
+        frames: chunksToProcess.length,
+        approxSeconds: Number(((chunksToProcess.length * TWILIO_FRAME_MS) / 1000).toFixed(2))
+      });
+
+      try {
+        const mulawBuffer = Buffer.concat(chunksToProcess);
+        const transcript = await transcribeAudio(mulawBuffer);
+        const cleanedTranscript = transcript.trim();
+
+        if (!cleanedTranscript) {
+          console.log('Sarvam STT returned empty transcript.');
+          return;
+        }
+
+        console.log('Transcript:', cleanedTranscript);
+
+        const faqAnswer = checkFAQ(cleanedTranscript);
+        if (faqAnswer) {
+          await sendTTSResponse(ws, faqAnswer, streamSid, () => {
+            isBotSpeaking = true;
+          });
+          return;
+        }
+
+        const parsed = await getAssistantReply(session, cleanedTranscript);
+        const extracted = parsed.extracted || {};
+
+        if (extracted.name) session.collected.name = extracted.name;
+        if (extracted.mobile) session.collected.mobile = extracted.mobile;
+        if (extracted.doctor) session.collected.doctor = extracted.doctor;
+
+        session.conversationHistory.push({ role: 'assistant', content: parsed.reply || '' });
+        session.conversationHistory = session.conversationHistory.slice(-10);
+
+        await sendTTSResponse(ws, parsed.reply || 'மன்னிக்கவும், மீண்டும் சொல்லுங்கள்.', streamSid, () => {
+          isBotSpeaking = true;
+        });
+
+        if (parsed.complete) {
+          console.log('Booking complete:', session.collected);
+        }
+      } catch (err) {
+        console.error('Processing error:', err.response?.data || err.message);
+      } finally {
+        isProcessing = false;
+      }
+    }
 
     ws.on('message', async (message) => {
       let data;
@@ -203,75 +290,54 @@ function setupMediaStream(server) {
 
       if (data.event === 'start') {
         streamSid = data.start.streamSid;
-        framesReceived = 0;
         console.log('Call started, streamSid:', streamSid);
-        await sendTTSResponse(ws, 'வணக்கம்! இது ஸ்ரீ லட்சுமி மருத்துவமனை. நான் உங்களுக்கு எப்படி உதவ முடியும்?', streamSid);
+        await sendTTSResponse(ws, 'வணக்கம்! இது ஸ்ரீ லட்சுமி மருத்துவமனை. நான் உங்களுக்கு எப்படி உதவ முடியும்?', streamSid, () => {
+          isBotSpeaking = true;
+        });
         return;
       }
 
-      if (data.event === 'media' && !isProcessing) {
-        if (framesReceived < 5) {
-          framesReceived += 1;
+      if (data.event === 'mark') {
+        console.log('Twilio finished playing:', data.mark?.name);
+        isBotSpeaking = false;
+        return;
+      }
+
+      if (data.event === 'media') {
+        inboundFrameCount += 1;
+
+        if (inboundFrameCount === 1 || inboundFrameCount % 100 === 0) {
+          console.log('Receiving caller media from Twilio:', {
+            frames: inboundFrameCount,
+            track: data.media.track,
+            payloadBytes: Buffer.from(data.media.payload, 'base64').length
+          });
+        }
+
+        if (isBotSpeaking) {
+          return;
+        }
+
+        if (skippedOpeningFrames < 5) {
+          skippedOpeningFrames += 1;
           return;
         }
 
         audioChunks.push(Buffer.from(data.media.payload, 'base64'));
-        clearTimeout(silenceTimer);
 
-        silenceTimer = setTimeout(async () => {
-          if (audioChunks.length < 20) {
-            audioChunks = [];
-            return;
-          }
-
-          isProcessing = true;
-          const mulawBuffer = Buffer.concat(audioChunks);
-          audioChunks = [];
-
-          try {
-            const transcript = await transcribeAudio(mulawBuffer);
-            const cleanedTranscript = transcript.trim();
-
-            if (cleanedTranscript) {
-              console.log('Transcript:', cleanedTranscript);
-
-              const faqAnswer = checkFAQ(cleanedTranscript);
-              if (faqAnswer) {
-                await sendTTSResponse(ws, faqAnswer, streamSid);
-              } else {
-                const parsed = await getAssistantReply(session, cleanedTranscript);
-                const extracted = parsed.extracted || {};
-
-                if (extracted.name) session.collected.name = extracted.name;
-                if (extracted.mobile) session.collected.mobile = extracted.mobile;
-                if (extracted.doctor) session.collected.doctor = extracted.doctor;
-
-                session.conversationHistory.push({ role: 'assistant', content: parsed.reply || '' });
-                session.conversationHistory = session.conversationHistory.slice(-10);
-
-                await sendTTSResponse(ws, parsed.reply || 'மன்னிக்கவும், மீண்டும் சொல்லுங்கள்.', streamSid);
-
-                if (parsed.complete) {
-                  console.log('Booking complete:', session.collected);
-                }
-              }
-            }
-          } catch (err) {
-            console.error('Processing error:', err.response?.data || err.message);
-          } finally {
-            isProcessing = false;
-          }
-        }, 800);
+        if (audioChunks.length >= FRAMES_PER_STT_CHUNK) {
+          await processCallerAudio('audio chunk is ready');
+        }
       }
 
       if (data.event === 'stop') {
         console.log('Call ended');
-        clearTimeout(silenceTimer);
+        await processCallerAudio('call ended');
       }
     });
 
-    ws.on('close', () => {
-      clearTimeout(silenceTimer);
+    ws.on('close', async () => {
+      await processCallerAudio('stream closed');
       console.log('Stream disconnected');
     });
   });
@@ -279,7 +345,7 @@ function setupMediaStream(server) {
   return wss;
 }
 
-async function sendTTSResponse(ws, text, streamSid) {
+async function sendTTSResponse(ws, text, streamSid, beforeSend) {
   try {
     assertSarvamKey();
     console.log('TTS Text:', text.substring(0, 80));
@@ -306,9 +372,11 @@ async function sendTTSResponse(ws, text, streamSid) {
     }
 
     if (ws.readyState === WebSocket.OPEN) {
+      const markName = `tts-${Date.now()}`;
+      if (beforeSend) beforeSend();
       ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload: audioBase64 } }));
-      ws.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: `tts-${Date.now()}` } }));
-      console.log('TTS audio sent, streamSid:', streamSid);
+      ws.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: markName } }));
+      console.log('TTS audio sent, streamSid:', streamSid, 'mark:', markName);
     } else {
       console.error('TTS not sent. WebSocket not open. readyState:', ws.readyState);
     }
