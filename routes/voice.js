@@ -13,12 +13,13 @@ const SILENCE_FRAMES_TO_END_UTTERANCE = 35; // About 700 ms.
 const MIN_SPEECH_FRAMES_FOR_STT = 18; // About 360 ms of actual voice.
 
 const DOCTORS = [
-  { name: 'Dr. Kumar', department: 'Cardiology', aliases: ['kumar', 'குமார்', 'குமாரு', 'cardiology', 'கார்டியாலஜி', 'heart', 'இதயம்'] },
-  { name: 'Dr. Priya', department: 'General Medicine', aliases: ['priya', 'பிரியா', 'general medicine', 'ஜெனரல்', 'medicine', 'மெடிசின்'] },
-  { name: 'Dr. Rajan', department: 'Orthopedic', aliases: ['rajan', 'ராஜன்', 'ராஜா', 'orthopedic', 'ortho', 'ஆர்த்தோ', 'எலும்பு'] }
+  { name: 'Dr. Kumar', spokenName: 'Doctor Kumar', department: 'cardiology', spokenDepartment: 'heart specialist', aliases: ['kumar', 'குமார்', 'குமாரு', 'cardiology', 'கார்டியாலஜி', 'heart', 'இதயம்'] },
+  { name: 'Dr. Priya', spokenName: 'Doctor Priya', department: 'general medicine', spokenDepartment: 'general medicine', aliases: ['priya', 'பிரியா', 'general medicine', 'ஜெனரல்', 'medicine', 'மெடிசின்'] },
+  { name: 'Dr. Rajan', spokenName: 'Doctor Rajan', department: 'orthopedic', spokenDepartment: 'bone specialist', aliases: ['rajan', 'ராஜன்', 'ராஜா', 'orthopedic', 'ortho', 'ஆர்த்தோ', 'எலும்பு'] }
 ];
 
-const DOCTOR_LIST_REPLY = 'எங்களிடம் Dr. Kumar, இதய மருத்துவம். Dr. Priya, பொது மருத்துவம். Dr. Rajan, எலும்பு மருத்துவம். யாரிடம் appointment வேண்டும்?';
+const DOCTOR_LIST_REPLY = 'Namma kitta Doctor Kumar, heart specialist. Doctor Priya, general medicine. Doctor Rajan, bone specialist irukkanga. Appointment yaar kitta venum?';
+let externalAppointmentSaver = null;
 
 function getSarvamHeaders() {
   return { 'api-subscription-key': SARVAM_API_KEY };
@@ -28,6 +29,85 @@ function assertSarvamKey() {
   if (!SARVAM_API_KEY) {
     throw new Error('SARVAM_API_KEY is not set');
   }
+}
+
+function setAppointmentSaver(saveFn) {
+  externalAppointmentSaver = saveFn;
+}
+
+function buildAppointmentPayload(collected) {
+  const now = new Date();
+  return {
+    name: collected.name,
+    patientName: collected.name,
+    mobile: collected.mobile,
+    mobileNumber: collected.mobile,
+    phone: collected.mobile,
+    doctor: collected.doctor,
+    doctorName: collected.doctor,
+    status: 'waiting',
+    source: 'voice',
+    type: 'appointment',
+    date: now,
+    createdAt: now
+  };
+}
+
+function tryRequireModel() {
+  const modelPaths = [
+    '../models/Patient',
+    '../models/patient',
+    './models/Patient',
+    './models/patient',
+    '../models/Appointment',
+    '../models/appointment',
+    './models/Appointment',
+    './models/appointment'
+  ];
+
+  for (const modelPath of modelPaths) {
+    try {
+      return require(modelPath);
+    } catch (err) {
+      // Try the next common model path.
+    }
+  }
+
+  return null;
+}
+
+async function saveAppointment(collected) {
+  const payload = buildAppointmentPayload(collected);
+
+  if (externalAppointmentSaver) {
+    await externalAppointmentSaver(payload);
+    console.log('Appointment saved using injected saver:', payload);
+    return true;
+  }
+
+  if (process.env.APPOINTMENT_WEBHOOK_URL) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (process.env.APPOINTMENT_WEBHOOK_TOKEN) {
+      headers.Authorization = `Bearer ${process.env.APPOINTMENT_WEBHOOK_TOKEN}`;
+    }
+
+    await axios.post(process.env.APPOINTMENT_WEBHOOK_URL, payload, { headers });
+    console.log('Appointment saved using APPOINTMENT_WEBHOOK_URL:', payload);
+    return true;
+  }
+
+  const Model = tryRequireModel();
+  if (Model) {
+    const CreatedModel = Model.default || Model;
+    if (typeof CreatedModel.create === 'function') {
+      await CreatedModel.create(payload);
+      console.log('Appointment saved using local model:', payload);
+      return true;
+    }
+  }
+
+  console.warn('Appointment was booked but not saved. Add APPOINTMENT_WEBHOOK_URL or wire setAppointmentSaver/save model.', payload);
+  return false;
 }
 
 function mulawToPcm16(buffer) {
@@ -142,12 +222,12 @@ async function transcribeAudio(mulawBuffer) {
 }
 
 const FAQS = [
-  { keywords: ['நேரம்', 'time', 'timing', 'open', 'திற'], answer: 'OPD நேரம் காலை 8 மணி முதல் மதியம் 1 மணி வரை, மாலை 4 மணி முதல் இரவு 8 மணி வரை.' },
-  { keywords: ['கட்டணம்', 'fee', 'fees', 'charge', 'cost', 'விலை', 'பணம்'], answer: 'Consultation fee ரூபாய் 300 மட்டும்.' },
-  { keywords: ['எங்கே', 'where', 'location', 'address', 'வழி'], answer: 'நாங்கள் Anna Nagar, Chennai-வில் இருக்கிறோம். அருகில் உள்ள bus stop Anna Nagar Tower.' },
-  { keywords: ['emergency', 'urgent', 'அவசரம்'], answer: 'Emergency: 044-12345678. 24 மணி நேரமும் கிடைக்கும்.' },
-  { keywords: ['ஞாயிறு', 'sunday', 'holiday', 'விடுமுறை'], answer: 'ஞாயிற்றுக்கிழமை OPD இல்லை. திங்கள் முதல் சனி வரை மட்டும்.' },
-  { keywords: ['parking', 'பார்க்கிங்'], answer: 'மருத்துவமனை முன்பே free parking கிடைக்கும்.' }
+  { keywords: ['நேரம்', 'time', 'timing', 'open', 'திற'], answer: 'OPD timing morning 8 to 1, evening 4 to 8.' },
+  { keywords: ['கட்டணம்', 'fee', 'fees', 'charge', 'cost', 'விலை', 'பணம்'], answer: 'Consultation fee 300 rupees mattum.' },
+  { keywords: ['எங்கே', 'where', 'location', 'address', 'வழி'], answer: 'Hospital Anna Nagar Chennai la irukku. Nearest bus stop Anna Nagar Tower.' },
+  { keywords: ['emergency', 'urgent', 'அவசரம்'], answer: 'Emergency ku 044-12345678 call pannunga. 24 hours available.' },
+  { keywords: ['ஞாயிறு', 'sunday', 'holiday', 'விடுமுறை'], answer: 'Sunday OPD illa. Monday to Saturday mattum.' },
+  { keywords: ['parking', 'பார்க்கிங்'], answer: 'Hospital front la free parking irukku.' }
 ];
 
 function checkFAQ(text) {
@@ -171,6 +251,11 @@ function userIsAskingForDoctorList(text) {
   const lower = text.toLowerCase();
   const asksForDoctor = ['doctor', 'doctors', 'டாக்டர்', 'டாக்டர்கள்', 'யார்', 'available', 'list'].some((word) => lower.includes(word));
   return asksForDoctor && !extractDoctor(text);
+}
+
+function isThanksOrGoodbye(text) {
+  const lower = text.toLowerCase();
+  return ['thank', 'thanks', 'thank you', 'nandri', 'நன்றி', 'ok', 'okay', 'seri', 'சரி', 'bye'].some((word) => lower.includes(word));
 }
 
 function extractMobile(text) {
@@ -198,21 +283,21 @@ function maybeExtractNameFromAnswer(session, text) {
 function nextBookingQuestion(session) {
   if (!session.collected.doctor) {
     session.lastAsked = 'doctor';
-    return 'எந்த டாக்டரிடம் appointment வேண்டும்? Dr. Kumar, இதய மருத்துவம். Dr. Priya, பொது மருத்துவம். Dr. Rajan, எலும்பு மருத்துவம்.';
+    return 'Appointment ku endha doctor venum? Doctor Kumar, heart specialist. Doctor Priya, general medicine. Doctor Rajan, bone specialist.';
   }
 
   if (!session.collected.name) {
     session.lastAsked = 'name';
-    return `சரி, ${session.collected.doctor} appointment. உங்கள் பெயர் என்ன?`;
+    return `Seri, ${session.collected.doctor} appointment. Unga name enna?`;
   }
 
   if (!session.collected.mobile) {
     session.lastAsked = 'mobile';
-    return 'நன்றி. உங்கள் mobile number சொல்லுங்கள்.';
+    return 'Thanks. Unga mobile number sollunga.';
   }
 
   session.lastAsked = null;
-  return `நன்றி ${session.collected.name}. ${session.collected.doctor} அவர்களிடம் உங்கள் appointment பதிவு செய்யப்பட்டது. உங்கள் mobile number ${session.collected.mobile}.`;
+  return `Thank you ${session.collected.name}. ${session.collected.doctor} kitta unga appointment booked. We will call this number: ${session.collected.mobile}.`;
 }
 
 function applyDeterministicBooking(session, transcript) {
@@ -247,19 +332,17 @@ function applyDeterministicBooking(session, transcript) {
 }
 
 function buildSystemPrompt(session) {
-  return `நீங்கள் ஸ்ரீ லட்சுமி மருத்துவமனையின் (Sri Lakshmi Hospital) AI வரவேற்பு உதவியாளர்.
+  return `You are Sri Lakshmi Hospital receptionist. Speak only simple colloquial Tanglish, not formal Tamil. Use short sentences.
 
-கிடைக்கும் டாக்டர்கள்: "Dr. Kumar" - இதய மருத்துவம், "Dr. Priya" - பொது மருத்துவம், "Dr. Rajan" - எலும்பு மருத்துவம். Department பெயரை doctor பெயருடன் சேர்த்து முழு பெயர் போல சொல்ல வேண்டாம்.
-OPD நேரம்: காலை 8-1 மணி, மாலை 4-8 மணி. ஞாயிறு விடுமுறை. Consultation fee ரூபாய் 300.
+Available doctors: Doctor Kumar - heart specialist. Doctor Priya - general medicine. Doctor Rajan - bone specialist. Do not read department as part of the doctor name.
+OPD timing: morning 8 to 1, evening 4 to 8. Sunday closed. Consultation fee 300 rupees.
 
-உங்கள் வேலை appointment booking மட்டும். நோயாளியிடம் பெயர், மொபைல் நம்பர், எந்த டாக்டரிடம் appointment வேண்டும் என்பதை மட்டும் கேட்டு சேகரிக்கவும். ஒரு நேரத்தில் ஒரே ஒரு கேள்வி மட்டும் கேளுங்கள்.
+Your main job is appointment booking. Collect only doctor, patient name, and mobile number. Ask one question at a time.
 
-இப்போது வரை சேகரிக்கப்பட்டது: ${JSON.stringify(session.collected)}
+Collected so far: ${JSON.stringify(session.collected)}
 
-உங்கள் பதில் STRICT JSON ஆக மட்டும் இருக்க வேண்டும், markdown backticks சேர்க்க வேண்டாம்:
-{"extracted":{"name":null அல்லது "string","mobile":null அல்லது "string","doctor":null அல்லது "Dr. Kumar" அல்லது "Dr. Priya" அல்லது "Dr. Rajan"},"reply":"தமிழில் சுருக்கமான பதில்","complete":true அல்லது false}
-
-name, mobile, doctor மூன்றும் கிடைத்தவுடன் complete:true ஆக்கி, appointment confirm செய்த பதிலை reply-ல் கொடுங்கள்.`;
+Return strict JSON only:
+{"extracted":{"name":null or "string","mobile":null or "string","doctor":null or "Dr. Kumar" or "Dr. Priya" or "Dr. Rajan"},"reply":"short colloquial Tanglish reply","complete":true or false}`;
 }
 
 async function getAssistantReply(session, transcript) {
@@ -290,7 +373,7 @@ async function getAssistantReply(session, transcript) {
     console.error('LLM JSON parse failed, raw was:', raw);
     return {
       extracted: {},
-      reply: 'மன்னிக்கவும், மீண்டும் சொல்ல முடியுமா?',
+      reply: 'Sorry, once more sollunga.',
       complete: false
     };
   }
@@ -320,7 +403,10 @@ function setupMediaStream(server) {
     const session = {
       collected: { name: null, mobile: null, doctor: null },
       conversationHistory: [],
-      lastAsked: null
+      lastAsked: null,
+      completed: false,
+      closeAfterPlayback: false,
+      saved: false
     };
 
     function resetCallerAudio() {
@@ -330,7 +416,27 @@ function setupMediaStream(server) {
       heardSpeech = false;
     }
 
+    function endCallAfterPlayback() {
+      session.closeAfterPlayback = true;
+    }
+
+    async function completeBookingAndReply(replyText) {
+      if (!session.saved) {
+        session.saved = await saveAppointment(session.collected);
+      }
+
+      session.completed = true;
+      endCallAfterPlayback();
+      await sendTTSResponse(ws, `${replyText} Call ah close panren. Thank you.`, streamSid, startBotSpeakingWindow);
+      console.log('Booking complete:', session.collected, 'saved:', session.saved);
+    }
+
     async function processCallerAudio(reason) {
+      if (session.completed) {
+        resetCallerAudio();
+        return;
+      }
+
       if (isProcessing || audioChunks.length === 0) return;
 
       if (speechFrameCount < MIN_SPEECH_FRAMES_FOR_STT) {
@@ -366,6 +472,11 @@ function setupMediaStream(server) {
 
         console.log('Transcript:', cleanedTranscript);
 
+        if (session.completed && isThanksOrGoodbye(cleanedTranscript)) {
+          endCallAfterPlayback();
+          return;
+        }
+
         if (userIsAskingForDoctorList(cleanedTranscript)) {
           await sendTTSResponse(ws, DOCTOR_LIST_REPLY, streamSid, startBotSpeakingWindow);
           session.lastAsked = 'doctor';
@@ -374,8 +485,11 @@ function setupMediaStream(server) {
 
         const bookingUpdate = applyDeterministicBooking(session, cleanedTranscript);
         if (bookingUpdate.handled) {
-          await sendTTSResponse(ws, bookingUpdate.reply, streamSid, startBotSpeakingWindow);
-          if (bookingUpdate.complete) console.log('Booking complete:', session.collected);
+          if (bookingUpdate.complete) {
+            await completeBookingAndReply(bookingUpdate.reply);
+          } else {
+            await sendTTSResponse(ws, bookingUpdate.reply, streamSid, startBotSpeakingWindow);
+          }
           return;
         }
 
@@ -395,10 +509,10 @@ function setupMediaStream(server) {
         session.conversationHistory.push({ role: 'assistant', content: parsed.reply || '' });
         session.conversationHistory = session.conversationHistory.slice(-10);
 
-        await sendTTSResponse(ws, parsed.reply || 'மன்னிக்கவும், மீண்டும் சொல்லுங்கள்.', streamSid, startBotSpeakingWindow);
-
-        if (parsed.complete) {
-          console.log('Booking complete:', session.collected);
+        if (parsed.complete && session.collected.name && session.collected.mobile && session.collected.doctor) {
+          await completeBookingAndReply(parsed.reply || nextBookingQuestion(session));
+        } else {
+          await sendTTSResponse(ws, parsed.reply || 'Sorry, once more sollunga.', streamSid, startBotSpeakingWindow);
         }
       } catch (err) {
         console.error('Processing error:', err.response?.data || err.message);
@@ -414,6 +528,10 @@ function setupMediaStream(server) {
         if (isBotSpeaking) {
           console.log('Bot speaking fallback ended; listening for caller now.');
           isBotSpeaking = false;
+          if (session.closeAfterPlayback && ws.readyState === WebSocket.OPEN) {
+            console.log('Closing Twilio stream after booking confirmation.');
+            ws.close(1000, 'booking complete');
+          }
         }
       }, Math.max(1200, durationMs + 700));
     }
@@ -431,7 +549,7 @@ function setupMediaStream(server) {
         streamSid = data.start.streamSid;
         console.log('Call started, streamSid:', streamSid);
         session.lastAsked = 'doctor';
-        await sendTTSResponse(ws, 'வணக்கம்! இது ஸ்ரீ லட்சுமி மருத்துவமனை. Appointment பதிவு செய்ய எந்த டாக்டரிடம் பார்க்க வேண்டும்?', streamSid, startBotSpeakingWindow);
+        await sendTTSResponse(ws, 'Vanakkam, Sri Lakshmi Hospital. Appointment book panna endha doctor venum?', streamSid, startBotSpeakingWindow);
         return;
       }
 
@@ -439,6 +557,11 @@ function setupMediaStream(server) {
         console.log('Twilio finished playing:', data.mark?.name);
         clearTimeout(botSpeakingFallbackTimer);
         isBotSpeaking = false;
+
+        if (session.closeAfterPlayback && ws.readyState === WebSocket.OPEN) {
+          console.log('Closing Twilio stream after booking confirmation.');
+          ws.close(1000, 'booking complete');
+        }
         return;
       }
 
@@ -454,7 +577,7 @@ function setupMediaStream(server) {
           });
         }
 
-        if (isBotSpeaking) {
+        if (isBotSpeaking || session.completed) {
           return;
         }
 
@@ -508,7 +631,7 @@ function setupMediaStream(server) {
 async function sendTTSResponse(ws, text, streamSid, beforeSend) {
   try {
     assertSarvamKey();
-    console.log('TTS Text:', text.substring(0, 80));
+    console.log('TTS Text:', text.substring(0, 120));
 
     const response = await axios.post('https://api.sarvam.ai/text-to-speech', {
       text,
@@ -549,5 +672,4 @@ async function sendTTSResponse(ws, text, streamSid, beforeSend) {
   }
 }
 
-module.exports = { router, setupMediaStream };
-
+module.exports = { router, setupMediaStream, setAppointmentSaver, saveAppointment };
