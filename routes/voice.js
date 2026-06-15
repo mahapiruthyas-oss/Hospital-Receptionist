@@ -15,11 +15,11 @@ const MIN_SPEECH_FRAMES_FOR_STT = 18; // About 360 ms of actual voice.
 
 const DOCTORS = [
   { name: 'Dr. Kumar', spokenName: 'டாக்டர் குமார்', department: 'Cardiology', spokenDepartment: 'இதய மருத்துவர்', aliases: ['kumar', 'குமார்', 'குமாரு', 'cardiology', 'கார்டியாலஜி', 'heart', 'இதயம்'] },
-  { name: 'Dr. Priya', spokenName: 'டாக்டர் பிரியா', department: 'General Medicine', spokenDepartment: 'ஜெனரல் மெடிசின்', aliases: ['priya', 'பிரியா', 'general medicine', 'ஜெனரல்', 'medicine', 'மெடிசின்'] },
+  { name: 'Dr. Priya', spokenName: 'டாக்டர் பிரியா', department: 'General Medicine', spokenDepartment: 'பொது மருத்துவர்', aliases: ['priya', 'பிரியா', 'general medicine', 'ஜெனரல்', 'medicine', 'மெடிசின்'] },
   { name: 'Dr. Rajan', spokenName: 'டாக்டர் ராஜன்', department: 'Orthopedic', spokenDepartment: 'எலும்பு மருத்துவர்', aliases: ['rajan', 'ராஜன்', 'ராஜா', 'orthopedic', 'ortho', 'ஆர்த்தோ', 'எலும்பு'] }
 ];
 
-const DOCTOR_LIST_REPLY = 'நம்ம கிட்ட டாக்டர் குமார், இதய மருத்துவர். டாக்டர் பிரியா, ஜெனரல் மெடிசின். டாக்டர் ராஜன், எலும்பு மருத்துவர் இருக்காங்க. யார்கிட்ட appointment வேணும்?';
+const DOCTOR_LIST_REPLY = 'நம்ம கிட்ட டாக்டர் குமார் இதய மருத்துவர், டாக்டர் பிரியா பொது மருத்துவர், டாக்டர் ராஜன் எலும்பு மருத்துவர் இருக்காங்க. யார்கிட்ட appointment வேணும்?';
 let externalAppointmentSaver = null;
 let socketIo = null;
 
@@ -226,11 +226,11 @@ async function transcribeAudio(mulawBuffer) {
 }
 
 const FAQS = [
-  { keywords: ['நேரம்', 'time', 'timing', 'open', 'திற'], answer: 'OPD timing காலை 8 to 1, மாலை 4 to 8.' },
-  { keywords: ['கட்டணம்', 'fee', 'fees', 'charge', 'cost', 'விலை', 'பணம்'], answer: 'Consultation fee 300 ரூபாய் தான்.' },
-  { keywords: ['எங்கே', 'where', 'location', 'address', 'வழி'], answer: 'Hospital Anna Nagar Chennai ல இருக்கு. Anna Nagar Tower bus stop பக்கம்.' },
-  { keywords: ['emergency', 'urgent', 'அவசரம்'], answer: 'Emergency க்கு 044-12345678 call பண்ணுங்க. 24 hours available.' },
-  { keywords: ['ஞாயிறு', 'sunday', 'holiday', 'விடுமுறை'], answer: 'Sunday OPD இல்ல. Monday to Saturday மட்டும்.' },
+  { keywords: ['நேரம்', 'time', 'timing', 'open', 'திற'], answer: 'OPD நேரம் காலை எட்டு மணி முதல் ஒரு மணி வரை. மாலை நான்கு மணி முதல் எட்டு மணி வரை.' },
+  { keywords: ['கட்டணம்', 'fee', 'fees', 'charge', 'cost', 'விலை', 'பணம்'], answer: 'Consultation fee மூனூறு ரூபாய் தான்.' },
+  { keywords: ['எங்கே', 'where', 'location', 'address', 'வழி'], answer: 'Hospital சென்னை அண்ணா நகர்ல இருக்கு. Anna Nagar Tower bus stop பக்கம்.' },
+  { keywords: ['emergency', 'urgent', 'அவசரம்'], answer: 'Emergency க்கு zero four four, one two three four five six seven eight number க்கு call பண்ணுங்க. எப்பவும் available.' },
+  { keywords: ['ஞாயிறு', 'sunday', 'holiday', 'விடுமுறை'], answer: 'Sunday OPD இல்ல. Monday முதல் Saturday வரை மட்டும்.' },
   { keywords: ['parking', 'பார்க்கிங்'], answer: 'Hospital முன்னாடி free parking இருக்கு.' }
 ];
 
@@ -262,10 +262,58 @@ function isThanksOrGoodbye(text) {
   return ['thank', 'thanks', 'thank you', 'nandri', 'நன்றி', 'ok', 'okay', 'seri', 'சரி', 'bye'].some((word) => lower.includes(word));
 }
 
+function normalizeNumberWordToken(token) {
+  const cleaned = token.toLowerCase().replace(/[.,!?;:()\[\]{}"']/g, '').trim();
+  const map = {
+    '0': '0', 'zero': '0', 'oh': '0', 'o': '0', 'ஜீரோ': '0', 'சீரோ': '0', 'பூஜ்ஜியம்': '0', 'சுழியம்': '0',
+    '1': '1', 'one': '1', 'ஒன்': '1', 'ஒன்று': '1', 'ஒன்னு': '1', 'ஒரு': '1',
+    '2': '2', 'two': '2', 'டூ': '2', 'டு': '2', 'இரண்டு': '2', 'ரெண்டு': '2', 'ரண்டு': '2',
+    '3': '3', 'three': '3', 'tree': '3', 'த்ரீ': '3', 'மூன்று': '3', 'மூணு': '3', 'முனு': '3',
+    '4': '4', 'four': '4', 'for': '4', 'ஃபோர்': '4', 'போர்': '4', 'நான்கு': '4', 'நாலு': '4',
+    '5': '5', 'five': '5', 'ஃபைவ்': '5', 'பைவ்': '5', 'ஐந்து': '5', 'அஞ்சு': '5',
+    '6': '6', 'six': '6', 'சிக்ஸ்': '6', 'ஆறு': '6', 'ஆரு': '6',
+    '7': '7', 'seven': '7', 'செவன்': '7', 'ஏழு': '7', 'எழு': '7',
+    '8': '8', 'eight': '8', 'ate': '8', 'எய்ட்': '8', 'எட்டு': '8',
+    '9': '9', 'nine': '9', 'நைன்': '9', 'ஒன்பது': '9', 'ஒம்பது': '9', 'ஒன்பது': '9'
+  };
+  return map[cleaned] || null;
+}
+
 function extractMobile(text) {
-  const digits = text.replace(/\D/g, '');
-  const match = digits.match(/[6-9]\d{9}/);
-  return match ? match[0] : null;
+  const tamilDigits = { '௦': '0', '௧': '1', '௨': '2', '௩': '3', '௪': '4', '௫': '5', '௬': '6', '௭': '7', '௮': '8', '௯': '9' };
+  const normalizedText = text.replace(/[௦-௯]/g, (digit) => tamilDigits[digit] || digit);
+  const directDigits = normalizedText.replace(/\D/g, '');
+  const directMatch = directDigits.match(/[6-9]\d{9}/);
+  if (directMatch) return directMatch[0];
+
+  const tokens = normalizedText.split(/\s+/).filter(Boolean);
+  const parsedDigits = [];
+  let repeatNext = 1;
+
+  for (const token of tokens) {
+    const cleaned = token.toLowerCase().replace(/[.,!?;:()\[\]{}"']/g, '').trim();
+    if (['double', 'டபுள்', 'ரெட்டை'].includes(cleaned)) {
+      repeatNext = 2;
+      continue;
+    }
+    if (['triple', 'டிரிபுள்'].includes(cleaned)) {
+      repeatNext = 3;
+      continue;
+    }
+
+    const digit = normalizeNumberWordToken(cleaned);
+    if (digit !== null) {
+      for (let i = 0; i < repeatNext; i += 1) parsedDigits.push(digit);
+      repeatNext = 1;
+    }
+  }
+
+  const numberFromWords = parsedDigits.join('');
+  const wordMatch = numberFromWords.match(/[6-9]\d{9}/);
+  if (wordMatch) return wordMatch[0];
+
+  console.log('Mobile not captured from transcript:', { transcript: text, parsedDigits: numberFromWords });
+  return null;
 }
 
 function maybeExtractNameFromAnswer(session, text) {
@@ -287,21 +335,21 @@ function maybeExtractNameFromAnswer(session, text) {
 function nextBookingQuestion(session) {
   if (!session.collected.doctor) {
     session.lastAsked = 'doctor';
-    return 'Appointment க்கு எந்த doctor வேணும்? டாக்டர் குமார், இதய மருத்துவர். டாக்டர் பிரியா, ஜெனரல் மெடிசின். டாக்டர் ராஜன், எலும்பு மருத்துவர்.';
+    return 'Appointment க்கு எந்த doctor வேணும்? டாக்டர் குமார் இதய மருத்துவர், டாக்டர் பிரியா பொது மருத்துவர், டாக்டர் ராஜன் எலும்பு மருத்துவர்.';
   }
 
   if (!session.collected.name) {
     session.lastAsked = 'name';
-    return `Seri, ${session.collected.doctor} appointment. Unga name enna?`;
+    return `${session.collected.doctor} appointment சரி. உங்க பேர் என்ன?`;
   }
 
   if (!session.collected.mobile) {
     session.lastAsked = 'mobile';
-    return 'Thanks. உங்க mobile number சொல்லுங்க.';
+    return 'சரி. உங்க mobile number ஒவ்வொரு digit ஆ சொல்லுங்க.';
   }
 
   session.lastAsked = null;
-  return `Thank you ${session.collected.name}. ${session.collected.doctor} kitta unga appointment booked. We will call this number: ${session.collected.mobile}.`;
+  return `Thank you ${session.collected.name}. ${session.collected.doctor} கிட்ட உங்க appointment book ஆயிடுச்சு. இந்த number க்கு call பண்ணுவோம்: ${session.collected.mobile}.`;
 }
 
 function applyDeterministicBooking(session, transcript) {
@@ -336,9 +384,9 @@ function applyDeterministicBooking(session, transcript) {
 }
 
 function buildSystemPrompt(session) {
-  return `You are Sri Lakshmi Hospital receptionist. Speak in natural Chennai-style spoken Tamil, with common English words when useful. Use Tamil script, not romanized Tanglish. Keep it simple and friendly, not literary Tamil.
+  return `You are Sri Lakshmi Hospital receptionist. Speak in natural friendly spoken Tamil used in Chennai. Use Tamil script. Do not use romanized Tanglish like 'venum', 'sollunga', 'book panna'. Common English words like appointment, doctor, mobile are okay. Keep it short, not literary Tamil.
 
-Available doctors: டாக்டர் குமார் - இதய மருத்துவர். டாக்டர் பிரியா - ஜெனரல் மெடிசின். டாக்டர் ராஜன் - எலும்பு மருத்துவர். Do not read department as part of the doctor name.
+Available doctors: டாக்டர் குமார் - இதய மருத்துவர். டாக்டர் பிரியா - பொது மருத்துவர். டாக்டர் ராஜன் - எலும்பு மருத்துவர். Do not read department as part of the doctor name.
 OPD timing: காலை 8 to 1, மாலை 4 to 8. Sunday closed. Consultation fee 300 rupees.
 
 Your main job is appointment booking. Collect only doctor, patient name, and mobile number. Ask one question at a time.
@@ -346,7 +394,7 @@ Your main job is appointment booking. Collect only doctor, patient name, and mob
 Collected so far: ${JSON.stringify(session.collected)}
 
 Return strict JSON only:
-{"extracted":{"name":null or "string","mobile":null or "string","doctor":null or "Dr. Kumar" or "Dr. Priya" or "Dr. Rajan"},"reply":"short natural spoken Tamil reply with common English words","complete":true or false}`;
+{"extracted":{"name":null or "string","mobile":null or "string","doctor":null or "Dr. Kumar" or "Dr. Priya" or "Dr. Rajan"},"reply":"short natural spoken Tamil reply in Tamil script, with only common English words","complete":true or false}`;
 }
 
 async function getAssistantReply(session, transcript) {
@@ -554,7 +602,7 @@ function setupMediaStream(server, io) {
         streamSid = data.start.streamSid;
         console.log('Call started, streamSid:', streamSid);
         session.lastAsked = 'doctor';
-        await sendTTSResponse(ws, 'வணக்கம், Sri Lakshmi Hospital. Appointment book பண்ண எந்த doctor வேணும்?', streamSid, startBotSpeakingWindow);
+        await sendTTSResponse(ws, 'வணக்கம், Sri Lakshmi Hospital. Appointment க்கு எந்த doctor வேணும்?', streamSid, startBotSpeakingWindow);
         return;
       }
 
@@ -678,6 +726,7 @@ async function sendTTSResponse(ws, text, streamSid, beforeSend) {
 }
 
 module.exports = { router, setupMediaStream, setAppointmentSaver, setSocketIo, saveAppointment };
+
 
 
 
